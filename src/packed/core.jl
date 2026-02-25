@@ -111,13 +111,6 @@ or an error code and position on failure.
 function parsebytes end
 
 """
-    shortcode([io::IO], id) -> Nothing or String
-
-Write or return the minimal string representation of `id`.
-"""
-function shortcode end
-
-"""
     tobytes(id) -> (buf, len)
 
 Buffer-based output. Returns `(Memory{UInt8}, length)`.
@@ -154,7 +147,7 @@ Base.@assume_effects :foldable function cardtype(minbits::Int)
     logtypesize = 1 + 8 * sizeof(minbits) - leading_zeros(cld(minbits, 8) - 1)
     if logtypesize > 5
         throw(ArgumentError(
-            "Cannot allocate more than 128 bits for an identifier field, but $minbits bits were requested"))
+            "Cannot allocate more than 128 bits for a packed field, but $minbits bits were requested"))
     end
     (UInt8, UInt16, UInt32, UInt64, UInt128)[logtypesize]
 end

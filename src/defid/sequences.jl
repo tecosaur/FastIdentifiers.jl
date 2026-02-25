@@ -293,7 +293,7 @@ function compile_charseq_impl(state::DefIdState, nctx::NodeCtx,
     else
         nothing
     end
-    scanlimit = defid_lengthbound(state, nctx, maxlen)
+    scanlimit = emit_lengthbound(state, nctx, maxlen)
     # Parse
     parse_exprs = ExprVarLine[]
     push!(parse_exprs,

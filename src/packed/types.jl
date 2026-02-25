@@ -5,7 +5,7 @@
 # the extension API — third-party packages use them to define new
 # pattern nodes.
 
-## Type aliases (shared with DefId during transition)
+## Type aliases
 
 const ExprVarLine = Union{Expr, Symbol, LineNumberNode}
 const NodeCtx = Base.ImmutableDict{Symbol, Any}

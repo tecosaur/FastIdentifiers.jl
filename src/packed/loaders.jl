@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: © 2025 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# Register-loading and byte-comparison primitives for @defid codegen.
+# Register-loading and byte-comparison primitives for pattern codegen.
 #
 # Three layers:
 #   1. Register decomposition — break byte counts into typed register chunks

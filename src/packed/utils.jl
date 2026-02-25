@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: © 2025 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# Runtime functions called by code generated from @defid.
+# Runtime functions called by code generated from pattern compilation.
 #
 # Three families:
 # - Parsing: parseint, parsechars (digit/character scanning from byte vectors)

@@ -44,7 +44,7 @@ function compile_checkdigit(exprs::PatternExprs,
     checkval = gensym("checkval")
     ok_sym = gensym("checksum_ok")
     errmsg = register_errmsg(state, "Invalid check character")
-    lencheck = defid_lengthcheck(state, nctx, 1)
+    lencheck = emit_lengthcheck(state, nctx, 1)
     seg = exprs.segments[seg_idx]
     extract_copy = map(copy, seg.extract)
     parse_exprs = ExprVarLine[

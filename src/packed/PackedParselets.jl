@@ -10,5 +10,8 @@ include("types.jl")
 include("core.jl")
 include("loaders.jl")
 include("utils.jl")
+include("swar.jl")
+include("placeholders.jl")
+include("stringly.jl")
 
 end # module PackedParselets

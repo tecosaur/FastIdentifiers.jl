@@ -30,17 +30,24 @@ using .PackedParselets: SentinelSpec, SegmentBounds, SegmentCodegen, SegmentMeta
     # Runtime utilities
     parsechars, parseint, byte2int, fastparse,
     printchars, chars2string,
-    bufprint, bufprintchars
+    bufprint, bufprintchars,
+    # SWAR
+    gen_digit_parse,
+    # Placeholders
+    emit_lengthcheck, emit_static_lengthcheck, emit_lengthbound,
+    insert_length_checks!, fold_static_branches!, implement_casting!,
+    strip_segment_markers!, resolve_remaining_sentinels!,
+    # String handlers
+    compile_literal, compile_skip,
+    gen_literal_mismatch, gen_static_lchop, gen_string_match,
+    negate_match, conjoin_match
 
 @static if VERSION < v"1.13-"
     using .PackedParselets: takestring!
 end
 
 include("core.jl")
-include("swar.jl")
-include("stringly.jl")
 include("choices.jl")
-include("placeholders.jl")
 include("methods.jl")
 include("sequences.jl")
 include("checkdigits.jl")

@@ -62,7 +62,7 @@ function choice_setup(state::DefIdState, nctx::NodeCtx, options::Vector{Any})
     else
         opt_fail_expr(option, opt_label)
     end
-    lencheck = defid_lengthcheck(state, nctx, minimum(ncodeunits, soptions))
+    lencheck = emit_lengthcheck(state, nctx, minimum(ncodeunits, soptions))
     checkedmatch = if allowempty
         :(if $lencheck
               $(matcher...)
@@ -251,7 +251,7 @@ function build_hash_matcher(ph, matchoptions, soptions, casefold, fieldvar, foun
     parts = ExprVarLine[resolve_i...]
     verify_body = ExprVarLine[]
     if variable_len
-        optlencheck = defid_lengthcheck(state, nctx, :optlen, minoptlen, maximum(ncodeunits, matchoptions))
+        optlencheck = emit_lengthcheck(state, nctx, :optlen, minoptlen, maximum(ncodeunits, matchoptions))
         append!(verify_body,
                 ExprVarLine[:(optlen = $(optlens)[i]),
                             :(found = $optlencheck)])
@@ -266,7 +266,7 @@ function build_hash_matcher(ph, matchoptions, soptions, casefold, fieldvar, foun
             ve_wide = gen_verify_exprs(vt_wide, fieldvar)
             wide_block = Expr(:block, ve_wide.destructure..., :(found = $(and_suffix(ve_wide.checks))))
             verify_block = Expr(:block, ve.destructure..., :(found = $(and_suffix(ve.checks))))
-            ExprVarLine[Expr(:if, defid_static_lengthcheck(state, nctx, wide_minlen),
+            ExprVarLine[Expr(:if, emit_static_lengthcheck(state, nctx, wide_minlen),
                              wide_block, verify_block)]
         elseif !isempty(vt.chunks)
             ve = gen_verify_exprs(vt, fieldvar)
