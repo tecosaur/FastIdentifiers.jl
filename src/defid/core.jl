@@ -327,8 +327,18 @@ function process_segment_output!(exprs::IdExprs, state::DefIdState,
                                  nctx::NodeCtx, kind::Symbol, output::SegmentOutput)
     (; bounds, codegen, meta) = output
     option = get(nctx, :optional, nothing)
+    # Segment markers for assembly-phase length-check insertion.
+    # Store context needed to build a fail_expr later (without registering
+    # error messages now, which would shift indices for the old pass).
+    seg_id = length(state.segment_outputs) + 1
+    b = nctx[:current_branch]
+    opt_label = get(nctx, :opt_label, nothing)
+    push!(exprs.parse, Expr(:call, :__segment_begin, seg_id, b.id,
+                            first(bounds.parsed), last(bounds.parsed),
+                            option, opt_label, meta.desc))
     # Parse codegen
     append!(exprs.parse, codegen.parse)
+    push!(exprs.parse, Expr(:call, :__segment_end, seg_id))
     # Bit allocation
     if bounds.nbits > 0
         state.bits += bounds.nbits
