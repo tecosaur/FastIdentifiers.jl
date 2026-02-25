@@ -6,7 +6,7 @@
 # During pattern walking, length checks and type casts are emitted as
 # placeholder sentinel calls (e.g. `__length_check`, `__cast_to_id`)
 # since the final byte counts and type sizes aren't known yet. After
-# the full pattern has been walked, `resolve_length_checks!`,
+# the full pattern has been walked, `insert_length_checks!`,
 # `fold_static_branches!`, and `implement_casting!` replace these
 # sentinels with concrete expressions or compile-time constants.
 
@@ -27,39 +27,7 @@ function defid_lengthbound(state::DefIdState, nctx::NodeCtx, n::Int)
     Expr(:call, :__length_bound, b.id, b.parsed_max, n)
 end
 
-## Sentinel resolution
-
-"""
-    resolve_length_checks!(exprlikes, branches) -> exprlikes
-
-Walk the AST and replace all length-related sentinels with concrete expressions.
-
-Each sentinel type uses the emitting branch's `parsed_min` as the static guarantee:
-- `__length_check` → `true` or runtime `nbytes - pos + 1 >= n`
-- `__static_length_check` → compile-time `Bool` (never runtime)
-- `__length_bound` → `n` or `min(n, nbytes - pos + 1)`
-- `__branch_check(Bool, id)` → resolved via `resolve_branch_check`
-- `__branch_check(Int, id)` → left for `defid_parsebytes` (root upfront check)
-"""
-function resolve_length_checks!(exprlikes::Vector{<:ExprVarLine}, branches::Vector{ParseBranch})
-    remove = Int[]
-    for (idx, expr) in enumerate(exprlikes)
-        expr isa Expr || continue
-        if Meta.isexpr(expr, :call) && first(expr.args) === :__branch_check
-            if expr.args[2] === Bool
-                exprlikes[idx] = resolve_branch_check(branches[expr.args[3]])
-            end
-            continue
-        end
-        result = resolve_sentinels!(expr, branches)
-        if result === :remove
-            push!(remove, idx)
-        elseif !isnothing(result)
-            exprlikes[idx] = result
-        end
-    end
-    deleteat!(exprlikes, remove)
-end
+## Sentinel resolution helpers
 
 function resolve_branch_check(b::ParseBranch)
     local_min = b.parsed_min - b.start_min
@@ -67,65 +35,6 @@ function resolve_branch_check(b::ParseBranch)
         true
     else
         :(nbytes - pos + 1 >= $local_min)
-    end
-end
-
-# Recursive AST walker that resolves sentinel calls in-place.
-# Branch-local `parsed_min` is the guarantee, so optionals don't inflate
-# the max seen by sentinels in other branches.
-function resolve_sentinels!(expr::Expr, branches::Vector{ParseBranch})
-    remove = Int[]
-    for (i, arg) in enumerate(expr.args)
-        arg isa Expr || continue
-        sentinel = if Meta.isexpr(arg, :call)
-            first(arg.args)
-        end
-        if sentinel === :__length_check
-            resolved = resolve_length_check(arg, branches)
-            if resolved isa Expr
-                arg.head, arg.args = resolved.head, resolved.args
-            else
-                expr.args[i] = resolved
-            end
-        elseif sentinel === :__length_bound
-            branch_id, emission_max, n = arg.args[2:end]
-            if branches[branch_id].parsed_min - emission_max >= n
-                expr.args[i] = n
-            else
-                r = :(min($n, nbytes - pos + 1))
-                arg.head, arg.args = r.head, r.args
-            end
-        elseif sentinel === :__static_length_check
-            branch_id, emission_max, n = arg.args[2:end]
-            expr.args[i] = branches[branch_id].parsed_min - emission_max >= n
-        elseif sentinel === :__branch_check
-            if arg.args[2] === Bool
-                resolved = resolve_branch_check(branches[arg.args[3]])
-                if resolved isa Expr
-                    arg.head, arg.args = resolved.head, resolved.args
-                else
-                    expr.args[i] = resolved
-                end
-            end
-        else
-            result = resolve_sentinels!(arg, branches)
-            if result === :remove
-                push!(remove, i)
-            elseif !isnothing(result)
-                expr.args[i] = result
-            end
-        end
-    end
-    deleteat!(expr.args, remove)
-    nothing
-end
-
-function resolve_length_check(expr::Expr, branches::Vector{ParseBranch})
-    branch_id, emission_max, _, n_max, n_expr = expr.args[2:end]
-    if branches[branch_id].parsed_min - emission_max >= n_max
-        true
-    else
-        :(nbytes - pos + 1 >= $n_expr)
     end
 end
 
@@ -166,7 +75,7 @@ const SentinelInfo = @NamedTuple{
 }
 
 """
-    insert_length_checks!(pexprs, branches) -> pexprs
+    insert_length_checks!(pexprs, branches[, state]) -> pexprs
 
 Analyse segment markers and inner sentinels in `pexprs` to insert the
 minimum number of runtime length checks. After insertion, resolves all
@@ -175,8 +84,13 @@ sentinels (outer and inner) and strips markers.
 This is an optimisation pass: at each segment boundary where the remaining
 byte guarantee is insufficient, it inserts a check for the maximum useful
 amount, pushing the next mandatory check as far forward as possible.
+
+When `state` is provided, error messages are registered via `defid_errmsg`
+for proper error reporting. Without `state`, descriptions are used directly
+(for validation/comparison purposes only).
 """
-function insert_length_checks!(pexprs::Vector{ExprVarLine}, branches::Vector{ParseBranch})
+function insert_length_checks!(pexprs::Vector{ExprVarLine}, branches::Vector{ParseBranch},
+                               state::Union{Nothing, DefIdState} = nothing)
     # Pass 1: collect segment markers
     segments = SegmentInfo[]
     open_seg = nothing
@@ -210,38 +124,54 @@ function insert_length_checks!(pexprs::Vector{ExprVarLine}, branches::Vector{Par
     for (si, seg) in enumerate(segments)
         push!(get!(Vector{Int}, branch_segs, seg.branch_id), si)
     end
-    # Track which sentinels are unresolved (not statically covered by parsed_min)
-    unresolved = Set{Int}()
-    for (i, sent) in enumerate(sentinels)
-        bid = segments[sent.seg_idx].branch_id
-        if branches[bid].parsed_min - sent.emission_max < sent.threshold
-            push!(unresolved, i)
+    # Classify which segments need framework-inserted entry checks.
+    # A segment needs a framework check only if its handler emitted a
+    # __length_check sentinel — meaning the handler relies on an outer guard
+    # it expects the framework (or itself) to provide.
+    # Segments with no __length_check are self-validating: embeds delegate
+    # to inner parsebytes, charseqs post-validate after scanning, etc.
+    has_length_check = Set{Int}()
+    for sent in sentinels
+        sent.kind === :length_check && push!(has_length_check, sent.seg_idx)
+    end
+    # Among segments with __length_check, identify those whose handler check
+    # already covers the entry requirement (threshold >= parsed_min). These
+    # don't need an additional framework check — their sentinel resolves via
+    # the standard resolution pass.
+    has_own_outer_check = Set{Int}()
+    for sent in sentinels
+        if sent.kind === :length_check && sent.threshold >= segments[sent.seg_idx].parsed_min
+            push!(has_own_outer_check, sent.seg_idx)
         end
     end
     # For each branch, compute check insertions.
-    # Build fail_expr on demand from stored context (option, opt_label, desc).
-    # Note: for Phase A dual-emit, these expressions aren't used (old pass is
-    # primary), but we compute them for correctness validation.
+    # The check value is the cumulative minimum entry requirement of the current
+    # and all subsequent segments on this branch that need framework checks.
+    # Self-validating segments (no __length_check) and segments with their own
+    # outer checks are skipped. The remaining guarantee still erodes by parsed_max.
     insertions = Tuple{Int, Expr}[]  # (pexprs index, check expression)
     for (bid, seg_indices) in branch_segs
-        remaining = 0
+        # The root branch starts with parsed_min guaranteed by the upfront
+        # __branch_check. Optional branches start conservatively at 0 — their
+        # entry check (if any) is handled separately by __branch_check.
+        remaining = if bid == 1; branches[1].parsed_min else 0 end
         for si in seg_indices
             seg = segments[si]
-            # What does this segment need at entry?
             seg_entry_need = seg.parsed_min
-            # What do inner sentinels in this segment need?
-            seg_inner_need = 0
-            for (i, sent) in enumerate(sentinels)
-                sent.seg_idx == si && i ∈ unresolved || continue
-                seg_inner_need = Base.max(seg_inner_need, sent.threshold)
-            end
-            need = Base.max(seg_entry_need, seg_inner_need)
-            if remaining < need
-                G = max_needed_from(si, segments, sentinels, unresolved)
-                G = Base.max(G, need)
+            # Skip framework insertion if:
+            # - the segment has no __length_check (self-validating handler), or
+            # - the segment's handler check already covers entry (has_own_outer_check)
+            needs_framework_check = si in has_length_check && !(si in has_own_outer_check)
+            if remaining < seg_entry_need && needs_framework_check
+                G = cumulative_entry_min(si, segments)
+                G = Base.max(G, seg_entry_need)
                 fail = if isnothing(seg.option)
-                    # Required segment: error return (use desc as placeholder)
-                    :(return ($(seg.desc), pos))
+                    erridx = if !isnothing(state)
+                        defid_errmsg(state, seg.desc)
+                    else
+                        seg.desc
+                    end
+                    :(return ($erridx, pos))
                 else
                     opt_fail_expr(seg.option, seg.opt_label)
                 end
@@ -251,47 +181,46 @@ function insert_length_checks!(pexprs::Vector{ExprVarLine}, branches::Vector{Par
             remaining -= seg.parsed_max
         end
     end
-    # Pass 3: resolve all sentinels using the new guarantee tracking
-    # Check is: Expr(:||, Expr(:call, :>=, lhs, G), fail_expr)
-    insertion_set = Dict{Int, Int}()  # begin_idx -> guaranteed bytes
-    for (idx, expr) in insertions
-        G = expr.args[1].args[3]::Int
-        insertion_set[idx] = G
-    end
-    for (bid, seg_indices) in branch_segs
-        remaining = 0
+    # Pass 3: resolve all sentinels using the static parsed_min guarantee.
+    # Inner sentinels resolve via `branches[bid].parsed_min - emission_max >= n`,
+    # matching the old resolution pass. Framework-inserted checks don't propagate
+    # additional guarantees to inner sentinels — this preserves handler code-path
+    # selection (e.g. wide vs narrow register loads).
+    for (_, seg_indices) in branch_segs
         for si in seg_indices
             seg = segments[si]
-            if haskey(insertion_set, seg.begin_idx)
-                remaining = insertion_set[seg.begin_idx]
-            end
-            # Resolve sentinels in this segment
             for idx in seg.begin_idx+1:seg.end_idx-1
-                resolve_sentinels_with_guarantee!(pexprs, idx, branches, remaining)
+                resolve_sentinels_with_guarantee!(pexprs, idx, branches, 0)
             end
-            remaining -= seg.parsed_max
         end
     end
     # Pass 4: insert checks and strip markers
-    # Sort insertions by position (descending) so indices stay valid
     sort!(insertions, by=first, rev=true)
     for (idx, check_expr) in insertions
-        # Insert right after the __segment_begin marker
         insert!(pexprs, idx + 1, check_expr)
     end
-    # Strip markers (collect indices, remove in reverse)
-    marker_indices = Int[]
+    # Strip markers (top-level and nested)
+    strip_segment_markers!(pexprs)
+    # Pass 5: resolve any remaining sentinels not inside segment ranges
+    # (e.g. __branch_check in optional guards, top-level sentinels)
+    resolve_remaining_sentinels!(pexprs, branches)
+    pexprs
+end
+
+# Resolve sentinels that fall outside segment marker ranges (branch checks
+# in optional guards, etc.) using only the static parsed_min guarantee.
+function resolve_remaining_sentinels!(pexprs::Vector{ExprVarLine}, branches::Vector{ParseBranch})
     for (idx, expr) in enumerate(pexprs)
         expr isa Expr || continue
-        if Meta.isexpr(expr, :call) && !isempty(expr.args)
-            s = first(expr.args)
-            if s === :__segment_begin || s === :__segment_end
-                push!(marker_indices, idx)
+        if Meta.isexpr(expr, :call) && !isempty(expr.args) && first(expr.args) === :__branch_check
+            if expr.args[2] === Bool
+                pexprs[idx] = resolve_branch_check(branches[expr.args[3]])
             end
+            continue
         end
+        # Resolve any nested sentinels that weren't inside segments
+        resolve_sentinel_in_expr!(expr, branches, 0)
     end
-    deleteat!(pexprs, sort!(marker_indices, rev=false))
-    pexprs
 end
 
 # Collect sentinel calls from an expression tree
@@ -320,23 +249,22 @@ function collect_sentinels!(sentinels::Vector{SentinelInfo}, seg_idx::Int, expr)
     end
 end
 
-# Compute the maximum useful check value from segment si onward
-function max_needed_from(si::Int, segments::Vector{SegmentInfo},
-                         sentinels::Vector{SentinelInfo}, unresolved::Set{Int})
+# Compute how many bytes a single check at segment si can safely require.
+# We can batch fixed-width segments (parsed_min == parsed_max) into one
+# check, but must stop at the first variable-width segment boundary because
+# the guarantee erodes by parsed_max while we only know parsed_min was needed.
+function cumulative_entry_min(si::Int, segments::Vector{SegmentInfo})
     bid = segments[si].branch_id
-    # Find all segments on the same branch from si onward
     cumulative_max = 0
     G = 0
     for sj in si:length(segments)
         segments[sj].branch_id == bid || continue
-        # Check sentinels in segment sj
-        for (i, sent) in enumerate(sentinels)
-            sent.seg_idx == sj && i ∈ unresolved || continue
-            G = Base.max(G, sent.threshold + cumulative_max)
-        end
-        # Also need the outer entry requirement
         G = Base.max(G, segments[sj].parsed_min + cumulative_max)
         cumulative_max += segments[sj].parsed_max
+        # Stop batching past a variable-width segment: the guarantee
+        # erosion (parsed_max) exceeds the minimum used (parsed_min),
+        # so subsequent segments may not be reachable
+        segments[sj].parsed_min != segments[sj].parsed_max && break
     end
     G
 end
@@ -350,6 +278,7 @@ function resolve_sentinels_with_guarantee!(pexprs::Vector{ExprVarLine}, idx::Int
 end
 
 function resolve_sentinel_in_expr!(expr::Expr, branches::Vector{ParseBranch}, remaining::Int)
+    remove = Int[]
     for (i, arg) in enumerate(expr.args)
         arg isa Expr || continue
         if Meta.isexpr(arg, :call) && !isempty(arg.args)
@@ -373,6 +302,16 @@ function resolve_sentinel_in_expr!(expr::Expr, branches::Vector{ParseBranch}, re
                     r = :(min($n, nbytes - pos + 1))
                     arg.head, arg.args = r.head, r.args
                 end
+            elseif s === :__branch_check
+                if arg.args[2] === Bool
+                    resolved = resolve_branch_check(branches[arg.args[3]])
+                    if resolved isa Expr
+                        arg.head, arg.args = resolved.head, resolved.args
+                    else
+                        expr.args[i] = resolved
+                    end
+                end
+                # __branch_check(Int, id) is left for defid_parsebytes
             else
                 resolve_sentinel_in_expr!(arg, branches, remaining)
             end
@@ -380,14 +319,14 @@ function resolve_sentinel_in_expr!(expr::Expr, branches::Vector{ParseBranch}, re
             resolve_sentinel_in_expr!(arg, branches, remaining)
         end
     end
+    isempty(remove) || deleteat!(expr.args, remove)
 end
 
 """
     strip_segment_markers!(pexprs) -> pexprs
 
 Remove `__segment_begin` and `__segment_end` marker calls from the expression
-list and any nested expression blocks. Used by the old resolution pass to
-tolerate the new markers during the dual-emit transition.
+list and any nested expression blocks.
 """
 function strip_segment_markers!(pexprs::Vector{<:ExprVarLine})
     filter!(pexprs) do expr

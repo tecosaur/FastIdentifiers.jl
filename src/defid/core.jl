@@ -47,7 +47,7 @@ Per-branch byte counters for tracking parse/print bounds through optional nestin
 The root branch covers the required pattern; each `optional(...)` forks a child.
 `parsed_min`/`parsed_max` track cumulative input bytes consumed;
 `print_min`/`print_max` track cumulative output bytes produced.
-Length-check sentinels reference these counters so that `resolve_length_checks!`
+Length-check sentinels reference these counters so that `insert_length_checks!`
 can fold static guarantees and emit minimal runtime checks.
 """
 mutable struct ParseBranch

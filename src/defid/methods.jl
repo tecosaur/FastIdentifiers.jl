@@ -68,14 +68,9 @@ end
 function defid_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{IdValueSegment},
                           state::DefIdState, name::Symbol)
     parsed_min = state.branches[1].parsed_min
-    # New optimal length-check pass (operates on a deep copy, strips markers)
-    new_pexprs = ExprVarLine[deepcopy(e) for e in pexprs]
-    implement_casting!(state, new_pexprs)
-    insert_length_checks!(new_pexprs, state.branches)
-    fold_static_branches!(new_pexprs)
-    # Old pass: strip segment markers then resolve as before
-    strip_segment_markers!(pexprs)
-    resolved = resolve_length_checks!(implement_casting!(state, pexprs), state.branches)
+    # Primary pass: optimal length-check insertion with sentinel resolution
+    resolved = implement_casting!(state, pexprs)
+    insert_length_checks!(resolved, state.branches, state)
     fold_static_branches!(resolved)
     # Resolve __checksum_gate sentinel
     gate_idx = findfirst(resolved) do e
