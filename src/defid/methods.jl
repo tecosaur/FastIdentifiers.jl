@@ -1,113 +1,42 @@
 # SPDX-FileCopyrightText: © 2025 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# Final-stage codegen: assemble complete method definitions from the
-# accumulated PatternExprs (parse, print, segments, properties) produced
-# by pattern walking.
-#
-# Each `defid_*` function here emits one or more method definitions
-# for the generated identifier type. `defid_make` is the orchestrator
-# that wires them all into a single `:toplevel` block.
-
-## Top-level assembly
+# Identifier-specific method assembly: parse/tryparse with MalformedIdentifier
+# and ChecksumViolation, shortcode/tobytes, and purlprefix emission.
 
 """
     defid_make(exprs, state, name, segments) -> Expr(:toplevel, ...)
 
 Assemble all method definitions for the generated identifier type.
 
-Produces the primitive type declaration and methods for `parsebytes`,
-`parse`, `tryparse`, `shortcode`, `tobytes`, `propertynames`,
-`getproperty`, `segments`, the positional constructor, `show`, `isless`,
-and optionally `purlprefix`. Runs finalize hooks from the segment registry.
+Delegates to `assemble_type` for generic methods, with `identifier_finalize!`
+providing identifier-specific parse/tryparse, shortcode, and purlprefix.
 """
 function defid_make(exprs::PatternExprs, state::DefIdState, name::Symbol,
                     segments::NamedTuple = (;))
-    block = Expr(:toplevel)
-    numbits = 8 * cld(state.bits, 8)
-    implement_casting!(state, exprs.print)
-    root = state.branches[1]
-    push!(block.args,
-          :(Base.@__doc__(primitive type $(esc(name)) <: $AbstractIdentifier $numbits end)),
-          :($(GlobalRef(FastIdentifiers, :nbits))(::Type{$(esc(name))}) = $(state.bits)),
-          :($(GlobalRef(FastIdentifiers, :parsebounds))(::Type{$(esc(name))}) = $((root.parsed_min, root.parsed_max))),
-          :($(GlobalRef(FastIdentifiers, :printbounds))(::Type{$(esc(name))}) = $((root.print_min, root.print_max))),
-          defid_parsebytes(exprs.parse, exprs.segments, state, name),
-          defid_parse(state, name)...,
-          defid_shortcode(exprs.print, state, name),
-          :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $(Tuple(map(first, exprs.properties)))),
-          defid_properties(exprs.properties, exprs.segments, state, name),
-          defid_segments_type(exprs.segments, name),
-          defid_segments_value(exprs.segments, exprs.print, name),
-          defid_constructor(exprs.segments, exprs.properties, state, name),
-          defid_show(exprs.segments, exprs.properties, state, name),
-          :($(GlobalRef(Base, :isless))(a::$(esc(name)), b::$(esc(name))) =
-                Core.Intrinsics.ult_int(a, b)))
+    assemble_type(exprs, state, name, segments;
+                  finalize! = identifier_finalize!)
+end
+
+## Identifier-specific finalization
+
+function identifier_finalize!(block::Expr, exprs::PatternExprs,
+                              state::DefIdState, name::Symbol)
+    # parse/tryparse with MalformedIdentifier and ChecksumViolation
+    push!(block.args, identifier_parse(state, name)...)
+    # shortcode/tobytes
+    push!(block.args, identifier_shortcode(exprs.print, state, name))
+    # purlprefix
     prefix = get(state.globals, :purlprefix, nothing)
     if !isnothing(prefix)
         push!(block.args,
               :($(GlobalRef(FastIdentifiers, :purlprefix))(::Type{$(esc(name))}) = $prefix))
     end
-    # Run finalize hooks from the segment registry
-    seen_kinds = Set{Symbol}()
-    for (kind, _) in state.segment_outputs
-        kind ∈ seen_kinds && continue
-        push!(seen_kinds, kind)
-        if haskey(segments, kind)
-            def = getfield(segments, kind)
-            if !isnothing(def.finalize)
-                def.finalize(block, exprs, state, name)
-            end
-        end
-    end
-    push!(block.args, esc(name))
-    block
 end
 
-## parsebytes / parse / tryparse
+## parse / tryparse
 
-function defid_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{ValueSegment},
-                          state::DefIdState, name::Symbol)
-    parsed_min = state.branches[1].parsed_min
-    # Primary pass: optimal length-check insertion with sentinel resolution
-    resolved = implement_casting!(state, pexprs)
-    insert_length_checks!(resolved, state.branches, state)
-    fold_static_branches!(resolved)
-    # Resolve __checksum_gate sentinel
-    gate_idx = findfirst(resolved) do e
-        Meta.isexpr(e, :call) && first(e.args) === :__checksum_gate
-    end
-    if !isnothing(gate_idx)
-        ok_sym, checkpos_sym = resolved[gate_idx].args[2:3]
-        resolved[gate_idx] = :($ok_sym || return (parsed, -$checkpos_sym))
-    end
-    # Replace the root __branch_check sentinel with an upfront minimum-length check
-    formstr = segments_formstring(segments, state.branches)
-    errmsg = register_errmsg(state, string(
-        "Expected at least ", parsed_min, " bytes",
-        isempty(formstr) ? "" : string(", must match the form '", formstr, "'")))
-    split_idx = findfirst(resolved) do e
-        Meta.isexpr(e, :call) && first(e.args) === :__branch_check && e.args[2] == 1
-    end
-    if !isnothing(split_idx) && parsed_min > 0
-        resolved[split_idx] = if split_idx > 1
-            :(nbytes - pos >= $(parsed_min - 1) || return ($errmsg, 1))
-        else
-            :(nbytes >= $parsed_min || return ($errmsg, 1))
-        end
-    elseif !isnothing(split_idx)
-        deleteat!(resolved, split_idx)
-    end
-    :(Base.@assume_effects :foldable :nothrow function $(GlobalRef(FastIdentifiers, :parsebytes))(::Type{$(esc(name))}, idbytes::AbstractVector{UInt8})
-          parsed = $(zero_parsed_expr(state))
-          pos = 1
-          nbytes = length(idbytes)
-          $(resolved...)
-          (parsed, pos)
-      end)
-end
-
-function defid_parse(state::DefIdState, name::Symbol)
+function identifier_parse(state::DefIdState, name::Symbol)
     errmsgs = Tuple(state.errconsts)
     ename = esc(name)
     checkdigit_output = let idx = findfirst(p -> first(p) === :checkdigit, state.segment_outputs)
@@ -162,26 +91,10 @@ end
 
 ## shortcode / tobytes
 
-function defid_shortcode(pexprs::Vector{ExprVarLine}, state::DefIdState, name::Symbol)
+function identifier_shortcode(pexprs::Vector{ExprVarLine}, state::DefIdState, name::Symbol)
+    tobytes_def = assemble_tobytes(pexprs, state, name)
     root = state.branches[1]
-    maxbytes = root.print_max
-    minbytes = root.print_min
-    fixedlen = minbytes == maxbytes
-    # Build buffer-based expressions from the print expressions,
-    # stripping __segment_printed assignments used only by segments()
-    bufexprs = map(strip_segsets! ∘ copy, pexprs)
-    filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, bufexprs)
-    rewrite_bufprint!(bufexprs)
-    tobytes_def = :(function $(GlobalRef(FastIdentifiers, :tobytes))(id::$(esc(name)))
-          buf = $(if fixedlen
-                      :(Base.StringMemory($maxbytes))
-                  else
-                      :(Memory{UInt8}(undef, $maxbytes))
-                  end)
-          pos = 0
-          $(bufexprs...)
-          buf, pos
-      end)
+    fixedlen = root.print_min == root.print_max
     shortcode_io_def = :(function $(GlobalRef(FastIdentifiers, :shortcode))(io::IO, id::$(esc(name)))
           buf, len = tobytes(id)
           unsafe_write(io, pointer(buf), len)
@@ -202,309 +115,3 @@ function defid_shortcode(pexprs::Vector{ExprVarLine}, state::DefIdState, name::S
     end
     Expr(:block, tobytes_def, shortcode_io_def, shortcode_def)
 end
-
-## getproperty
-
-function defid_properties(properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
-                          segs::Vector{ValueSegment},
-                          state::DefIdState, name::Symbol)
-    isempty(properties) && return :()
-    resolved = resolve_property_segments(properties, segs)
-    fallback = :(throw(FieldError($(esc(name)), prop)))
-    clauses = foldr(enumerate(properties), init = fallback) do (i, (prop, val)), rest
-        prop_exprs = if val isa Symbol
-            idx = only(resolved[i].second)
-            copy(segs[idx].extract)
-        else
-            copy(val)
-        end
-        qprop = QuoteNode(prop)
-        body = Expr(:block, implement_casting!(state, prop_exprs)...)
-        Expr(if i == 1; :if else :elseif end, :(prop === $qprop), body, rest)
-    end
-    :(function $(GlobalRef(Base, :getproperty))(id::$(esc(name)), prop::Symbol)
-          $clauses
-      end)
-end
-
-## Constructor
-
-function defid_constructor(segs::Vector{ValueSegment},
-                          properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
-                          state::DefIdState, name::Symbol)
-    resolved = resolve_property_segments(properties, segs)
-    isempty(resolved) && return :()
-    # Build (argname, seg_index) pairs: single-node uses property name,
-    # multi-node gets numbered sub-names
-    args = Tuple{Symbol, Int}[]
-    for (pname, idxs) in resolved
-        if length(idxs) == 1
-            push!(args, (pname, only(idxs)))
-        else
-            for (j, si) in enumerate(idxs)
-                push!(args, (Symbol(pname, "_", j), si))
-            end
-        end
-    end
-    isempty(args) && return :()
-    params = [let seg = segs[si]
-                  if isnothing(seg.argtype)
-                      :($aname)
-                  else
-                      :($aname::$(seg.argtype))
-                  end
-              end for (aname, si) in args]
-    argbindings = [:($(segs[si].argvar) = $aname) for (aname, si) in args]
-    scope_checks = constructor_scope_checks(args, segs, state)
-    encode_exprs = reduce(vcat, (segs[si].impart for (_, si) in args); init=Any[])
-    targetsize = cld(state.bits, 8)
-    for expr in encode_exprs
-        if expr isa Expr
-            implement_casting!(expr, name, targetsize)
-        end
-    end
-    :(function $(esc(name))($(params...))
-          parsed = $(zero_parsed_expr(state))
-          $(argbindings...)
-          $(scope_checks...)
-          $(encode_exprs...)
-          parsed
-      end)
-end
-
-# Validate optional scope nesting: a child scope's args must not be
-# specified when the parent scope's args are nothing.
-function constructor_scope_checks(args::Vector{Tuple{Symbol, Int}},
-                                  segs::Vector{ValueSegment},
-                                  state::DefIdState)
-    scope_parents = Dict{Symbol, Symbol}()
-    for b in state.branches
-        b.scope === :root && continue
-        scope_parents[b.scope] = b.parent.scope
-    end
-    scope_args = Dict{Symbol, Vector{Int}}()
-    for (idx, (_, si)) in enumerate(args)
-        scope = segs[si].condition
-        isnothing(scope) && continue
-        push!(get!(Vector{Int}, scope_args, scope), idx)
-    end
-    [:(if isnothing($(args[first(pidxs)][1])) && !isnothing($(args[first(cidxs)][1]))
-           throw(ArgumentError(
-               string("Cannot specify ", $(QuoteNode(args[first(cidxs)][1])),
-                      " when ", $(QuoteNode(args[first(pidxs)][1])), " is nothing")))
-       end)
-     for (scope, cidxs) in scope_args
-     for pidxs in (get(scope_args, get(scope_parents, scope, nothing), nothing),)
-     if !isnothing(pidxs)]
-end
-
-## show
-
-function defid_show(segs::Vector{ValueSegment},
-                    properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
-                    state::DefIdState, name::Symbol)
-    resolved = resolve_property_segments(properties, segs)
-    isempty(resolved) && return :()
-    show_parts = ExprVarLine[]
-    for (pname, idxs) in resolved
-        isempty(show_parts) || push!(show_parts, :(print(io, ", ")))
-        if length(idxs) == 1
-            push!(show_parts, :(show(io, getproperty(id, $(QuoteNode(pname))))))
-        else
-            for (j, si) in enumerate(idxs)
-                j > 1 && push!(show_parts, :(print(io, ", ")))
-                extract_copy = map(copy, segs[si].extract)
-                implement_casting!(state, extract_copy)
-                push!(show_parts, Expr(:block, extract_copy[1:end-1]...,
-                                       :(show(io, $(extract_copy[end])))))
-            end
-        end
-    end
-    :(function $(GlobalRef(Base, :show))(io::IO, id::$(esc(name)))
-          if get(io, :limit, false) === true
-              if get(io, :typeinfo, Nothing) != $(esc(name))
-                  print(io, $(QuoteNode(name)), ':')
-              end
-              print(io, shortcode(id))
-          else
-              show(io, $(esc(name)))
-              print(io, '(')
-              $(show_parts...)
-              print(io, ')')
-          end
-      end)
-end
-
-## segments
-
-function defid_segments_type(segs::Vector{ValueSegment}, name::Symbol)
-    isempty(segs) && return :()
-    :(function $(GlobalRef(FastIdentifiers, :segments))(::Type{$(esc(name))})
-          $(Expr(:tuple, [(; nbits=s.nbits, kind=s.kind, label=s.label, desc=s.desc, shortform=s.shortform)
-                          for s in segs if s.nbits > 0]...))
-      end)
-end
-
-function defid_segments_value(segs::Vector{ValueSegment}, pexprs::Vector{ExprVarLine}, name::Symbol)
-    isempty(segs) && return :()
-    svars = Tuple{Int, Symbol}[]
-    pexprs2 = map(copy, pexprs)
-    for expr in pexprs2
-        rewrite_segment_captures!(svars, segs, expr)
-    end
-    :(function $(GlobalRef(FastIdentifiers, :segments))(id::$(esc(name)))
-          io = IOBuffer()
-          $(Expr(:(=), Expr(:tuple, (s for (_, s) in svars)...), Expr(:tuple, ("" for _ in svars)...)))
-          $(pexprs2...)
-          $(Expr(:tuple, (Expr(:tuple, i, s) for (i, s) in svars)...))
-      end)
-end
-
-# Replace `__segment_printed = i` markers with `segN = takestring!(io)`,
-# building up the (segment_index, varname) list as we go.
-function rewrite_segment_captures!(segvars::Vector{Tuple{Int, Symbol}},
-                                   segs::Vector{ValueSegment},
-                                   expr::ExprVarLine)
-    expr isa Expr || return expr
-    if Meta.isexpr(expr, :(=)) && first(expr.args) === :__segment_printed
-        _, i = expr.args
-        if i > length(segvars)
-            anon = segs[i].nbits == 0
-            precount = sum((s.nbits > 0 for s in segs[1:i-1]), init = 0)
-            push!(segvars, (if anon; 0 else precount + 1 end, Symbol("seg$i")))
-        end
-        var = last(segvars[i])
-        expr.args[1:2] = :($var = takestring!(io)).args
-    else
-        for arg in expr.args
-            if arg isa Expr
-                rewrite_segment_captures!(segvars, segs, arg)
-            end
-        end
-    end
-    expr
-end
-
-## Property-segment resolution
-
-# Map properties to `(name, segment_indices)` pairs, resolving Symbol refs
-# to the corresponding segment index.
-function resolve_property_segments(properties, segs::Vector{ValueSegment})
-    result = Pair{Symbol, Vector{Int}}[]
-    for (pname, val) in properties
-        if val isa Symbol
-            idx = findfirst(s -> s.label == val, segs)
-            isnothing(idx) && continue
-            push!(result, pname => [idx])
-        else
-            idxs = [i for (i, s) in enumerate(segs)
-                     if !isnothing(s.argtype) && s.label == pname]
-            push!(result, pname => idxs)
-        end
-    end
-    result
-end
-
-## Segment-set stripping
-
-# Remove `__segment_printed = N` markers from expression trees.
-# Used when print expressions are reused for buffer output or properties.
-function strip_segsets!(expr::ExprVarLine)
-    expr isa Expr || return expr
-    remove = Int[]
-    for (i, arg) in enumerate(expr.args)
-        arg isa Expr || continue
-        if Meta.isexpr(arg, :(=), 2) && first(arg.args) === :__segment_printed
-            push!(remove, i)
-        else
-            strip_segsets!(arg)
-        end
-    end
-    isempty(remove) || deleteat!(expr.args, remove)
-    expr
-end
-
-## Buffer printing
-
-"""
-    rewrite_bufprint!(pexprs)
-
-Rewrite `print(io, ...)` and `printchars(io, ...)` calls in `pexprs`
-into direct `Memory{UInt8}` buffer operations (`bufprint`, `bufprintchars`,
-`bufprint_static`), avoiding IO overhead in the generated `tobytes` method.
-
-Recurses into nested expressions. Modifies `pexprs` in place.
-"""
-function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
-    splices = Tuple{Int, Vector{Any}}[]
-    for (i, expr) in enumerate(pexprs)
-        if Meta.isexpr(expr, :call) && length(expr.args) >= 3 && expr.args[2] == :io
-            fname, _, args... = expr.args
-            replacement = if fname == :print
-                rewrite_print_call(args)
-            elseif fname == :write && length(args) == 1
-                Any[:(buf[pos += 1] = $(args[1]))]
-            elseif fname == :printchars
-                Any[:(pos = bufprintchars(buf, pos, $(args...)))]
-            elseif fname == :shortcode
-                ebuf = gensym("ebuf")
-                elen = gensym("elen")
-                Any[:(($ebuf, $elen) = tobytes($(args...))),
-                    :(Base.unsafe_copyto!(pointer(buf, pos + 1), pointer($ebuf), $elen)),
-                    :(pos += $elen)]
-            end
-            push!(splices, (i, replacement))
-        elseif expr isa Expr
-            for arg in expr.args
-                if arg isa Expr
-                    rewrite_bufprint!(arg.args)
-                end
-            end
-        end
-    end
-    for (i, replacement) in reverse(splices)
-        splice!(pexprs, i, replacement)
-    end
-end
-
-function rewrite_print_call(args)
-    if length(args) == 1
-        arg = first(args)
-        if Meta.isexpr(arg, :call) && first(arg.args) == :string
-            # print(io, string(var, kw...)) → bufprint(buf, pos, var, base, pad)
-            sargs = arg.args[2:end]
-            positional = Any[]
-            base, pad = 10, 0
-            for sa in sargs
-                if Meta.isexpr(sa, :kw, 2) && sa.args[1] == :base
-                    base = sa.args[2]
-                elseif Meta.isexpr(sa, :kw, 2) && sa.args[1] == :pad
-                    pad = sa.args[2]
-                else
-                    push!(positional, sa)
-                end
-            end
-            Any[:(pos = bufprint(buf, pos, $(positional...), $base, $pad))]
-        elseif arg isa String
-            Any[bufprint_static(arg)...]
-        else
-            Any[:(pos = bufprint(buf, pos, $arg))]
-        end
-    else
-        Any[:(pos = bufprint(buf, pos, $arg)) for arg in args]
-    end
-end
-
-function bufprint_static(str::String)
-    reduce(register_chunks(ncodeunits(str)), init = Expr[]) do exprs, (; offset, width, iT)
-        value = pack_bytes(str, offset, width, iT)
-        if iT === UInt8
-            push!(exprs, :(buf[pos += 1] = $value))
-        else
-            push!(exprs,
-                  :(Base.unsafe_store!(Ptr{$iT}(pointer(buf, pos + 1)), $value)),
-                  :(pos += $width))
-        end
-    end
-end
-

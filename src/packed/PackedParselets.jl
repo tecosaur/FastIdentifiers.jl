@@ -13,5 +13,9 @@ include("utils.jl")
 include("swar.jl")
 include("placeholders.jl")
 include("stringly.jl")
+include("choices.jl")
+include("sequences.jl")
+include("dispatch.jl")
+include("methods.jl")
 
 end # module PackedParselets

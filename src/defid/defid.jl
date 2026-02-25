@@ -40,18 +40,29 @@ using .PackedParselets: SentinelSpec, SegmentBounds, SegmentCodegen, SegmentMeta
     # String handlers
     compile_literal, compile_skip,
     gen_literal_mismatch, gen_static_lchop, gen_string_match,
-    negate_match, conjoin_match
+    negate_match, conjoin_match,
+    # Choice handler
+    compile_choice,
+    # Sequence handlers
+    compile_digits, compile_charseq, compile_embed,
+    # Pattern dispatch
+    CORE_SEGMENTS, pattern_dispatch!, pattern_field!, pattern_optional!,
+    # Method assembly
+    assemble_type, assemble_parsebytes, assemble_tobytes,
+    assemble_properties, assemble_constructor, assemble_show,
+    assemble_segments_type, assemble_segments_value,
+    resolve_property_segments, strip_segsets!, rewrite_bufprint!,
+    bufprint_static, rewrite_segment_captures!, constructor_scope_checks,
+    default_finalize!
 
 @static if VERSION < v"1.13-"
     using .PackedParselets: takestring!
 end
 
 include("core.jl")
-include("choices.jl")
-include("methods.jl")
-include("sequences.jl")
 include("checkdigits.jl")
 include("dispatch.jl")
+include("methods.jl")
 
 """
     deftype(segments, mod, name, pattern; casefold, purlprefix) -> Expr(:toplevel, ...)
@@ -72,8 +83,10 @@ function deftype(segments::NamedTuple, mod::Module, name::Symbol, pattern;
     exprs = PatternExprs(([], [], [], []))
     if !isnothing(purlprefix)
         defid_dispatch!(exprs, state, nctx, segments, Expr(:call, :skip, lowercase(purlprefix)))
+        root.parsed_min = 0
+        root.parsed_max = 0
     end
-    defid_dispatch!(exprs, state, nctx, segments, :__first_nonskip)
+    push!(exprs.parse, Expr(:call, :__branch_check, root.id, nothing))
     defid_dispatch!(exprs, state, nctx, segments, pattern)
     defid_make(exprs, state, name, segments)
 end

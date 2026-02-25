@@ -14,7 +14,7 @@ Handle a `choice(...)` pattern node.
 Validates options, builds a matcher (via perfect hashing or linear scan),
 then delegates to `compile_choice_value` or `compile_choice_fixed`.
 """
-function compile_choice(state::DefIdState, nctx::NodeCtx,
+function compile_choice(state::ParserState, nctx::NodeCtx,
                         ::SegmentDef, options::Vector{Any})
     all(o -> o isa String, options) || throw(ArgumentError("Expected all options to be strings for choice"))
     ctx = choice_setup(state, nctx, options)
@@ -25,7 +25,7 @@ function compile_choice(state::DefIdState, nctx::NodeCtx,
     end
 end
 
-function choice_setup(state::DefIdState, nctx::NodeCtx, options::Vector{Any})
+function choice_setup(state::ParserState, nctx::NodeCtx, options::Vector{Any})
     soptions = Vector{String}(options)
     allowempty = any(isempty, soptions)
     allowempty && filter!(!isempty, soptions)
@@ -81,7 +81,7 @@ function choice_setup(state::DefIdState, nctx::NodeCtx, options::Vector{Any})
        checkedmatch, matcher, target, claims)
 end
 
-function compile_choice_value(state::DefIdState, nctx::NodeCtx, ctx)
+function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
     (; soptions, fieldvar, option, allowempty, choicebits, choiceint, checkedmatch, claims) = ctx
     # Compute bit position without mutating state.bits
     nbits_pos = state.bits + choicebits
@@ -128,7 +128,7 @@ function compile_choice_value(state::DefIdState, nctx::NodeCtx, ctx)
         impart_body=impart_core, print=print_exprs)
 end
 
-function compile_choice_fixed(state::DefIdState, nctx::NodeCtx, ctx)
+function compile_choice_fixed(state::ParserState, nctx::NodeCtx, ctx)
     (; soptions, fieldvar, option, allowempty, choiceint, checkedmatch, matcher, target) = ctx
     parse_exprs = if any(isempty, soptions)
         ExprVarLine[matcher]
@@ -162,16 +162,16 @@ falls back to linear scan. May reorder options to match hash output order.
 """
 function build_choice_matcher(matchoptions::Vector{String}, soptions::Vector{String},
                               casefold, fieldvar::Symbol, foundaction,
-                              choiceint, state::DefIdState, nctx::NodeCtx)
+                              choiceint, state::ParserState, nctx::NodeCtx)
     ph = find_perfect_hash(matchoptions, casefold)
     if !isnothing(ph)
-        build_hash_matcher(ph, matchoptions, soptions, casefold, fieldvar, foundaction, choiceint, state, nctx)
+        build_hash_matcher(state, nctx, ph, matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
     else
-        build_linear_matcher(matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
+        build_linear_matcher(state, nctx, matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
     end
 end
 
-function build_hash_matcher(ph, matchoptions, soptions, casefold, fieldvar, foundaction, choiceint, state, nctx)
+function build_hash_matcher(state, nctx, ph, matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
     # Reorder options to match hash output order
     matchoptions = matchoptions[ph.perm]
     soptions = soptions[ph.perm]
@@ -297,7 +297,8 @@ function build_hash_matcher(ph, matchoptions, soptions, casefold, fieldvar, foun
     (parts, matchoptions, soptions)
 end
 
-function build_linear_matcher(matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
+function build_linear_matcher(state::ParserState, nctx::NodeCtx,
+                              matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
     # Sort longest-first for greedy matching when options share prefixes
     perm = sortperm(matchoptions, by=ncodeunits, rev=true)
     matchoptions = matchoptions[perm]
@@ -310,20 +311,26 @@ function build_linear_matcher(matchoptions, soptions, casefold, fieldvar, founda
     else
         :(@inbounds idbytes[pos + j - 1])
     end
-    matcher = ExprVarLine[:(for (i, (prefixlen, prefixbytes)) in enumerate(zip($optlens, $optcus))
-          nbytes - pos + 1 >= prefixlen || continue
-          found = true
-          for j in 1:prefixlen
-              $loadbyte != prefixbytes[j] || continue
-              found = false
-              break
-          end
-          if found
-              $(foundaction(:(i % $choiceint)))
-              pos += prefixlen
-              break
-          end
-      end)]
+    action = foundaction(:(i % $choiceint))
+    loop_body = quote
+        found = true
+        for j in 1:prefixlen
+            $loadbyte == prefixbytes[j] || (found = false; break)
+        end
+        if found; $action; pos += prefixlen; break end
+    end
+    guarded_loop = :(
+        for (i, (prefixlen, prefixbytes)) in enumerate(zip($optlens, $optcus))
+            nbytes - pos + 1 >= prefixlen || continue
+            $(loop_body.args...)
+        end)
+    unguarded_loop = :(
+        for (i, (prefixlen, prefixbytes)) in enumerate(zip($optlens, $optcus))
+            $(loop_body.args...)
+        end)
+    maxlen = maximum(optlens)
+    all_fit = emit_static_lengthcheck(state, nctx, maxlen)
+    matcher = ExprVarLine[Expr(:if, all_fit, unguarded_loop, guarded_loop)]
     (matcher, matchoptions, soptions)
 end
 

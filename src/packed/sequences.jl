@@ -7,7 +7,7 @@
 
 ## Digits
 
-function compile_digits(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Vector{Any})
+function compile_digits(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::Vector{Any})
     length(args) ∈ (0, 1) || throw(ArgumentError("Expected at most one positional argument for digits, got $(length(args))"))
     base = get(nctx, :base, 10)::Int
     min = get(nctx, :min, 0)::Int
@@ -153,7 +153,7 @@ const NAMED_CHARSETS = (
     hex     = (UInt8('0'):UInt8('9'), UInt8('A'):UInt8('F')),
 )
 
-function compile_charseq(state::DefIdState, nctx::NodeCtx,
+function compile_charseq(state::ParserState, nctx::NodeCtx,
                          def::SegmentDef, args::Vector{Any})
     kind = def.name
     named = haskey(NAMED_CHARSETS, kind)
@@ -215,7 +215,7 @@ Resolve `upper`/`lower`/`casefold` flags and transform character ranges.
 Letter ranges (subsets of A-Z or a-z) are shifted to the target case and deduplicated.
 Non-letter ranges pass through unchanged.
 """
-function resolve_charseq_flags(state::DefIdState, nctx, kind::Symbol, ranges)
+function resolve_charseq_flags(state::ParserState, nctx, kind::Symbol, ranges)
     upper = get(nctx, :upper, false)::Bool
     lower = get(nctx, :lower, false)::Bool
     casefold = get(nctx, :casefold, false)::Bool
@@ -253,7 +253,7 @@ function collapse_letter_ranges(ranges, target::Symbol)
     sort!(out; by=first)
 end
 
-function compile_charseq_impl(state::DefIdState, nctx::NodeCtx,
+function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
                               minlen::Int, maxlen::Int,
                               ranges::Vector{UnitRange{UInt8}},
                               cfold::Bool, kind::Symbol)
@@ -408,14 +408,20 @@ function compile_charseq_impl(state::DefIdState, nctx::NodeCtx,
 end
 
 
-## Embedded identifier types
+## Embedded packed types
 
-function compile_embed(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Vector{Any})
-    length(args) == 1 || throw(ArgumentError("embed takes exactly one argument (the identifier type)"))
+function compile_embed(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::Vector{Any})
+    length(args) == 1 || throw(ArgumentError("embed takes exactly one argument (the type)"))
     T = Core.eval(state.mod, args[1])
-    T isa DataType && T <: AbstractIdentifier && isprimitivetype(T) ||
-        throw(ArgumentError("embed type must be a primitive AbstractIdentifier subtype, got $T"))
-    ebits = nbits(T)
+    T isa DataType && T <: state.supertype && isprimitivetype(T) ||
+        throw(ArgumentError("embed type must be a primitive $(state.supertype) subtype, got $T"))
+    # Look up methods via the method module (e.g. FastIdentifiers) since
+    # PackedParselets.nbits etc. have no concrete methods for user-defined types.
+    M = state.method_module
+    _nbits = getfield(M, :nbits)
+    _parsebounds = getfield(M, :parsebounds)
+    _printbounds = getfield(M, :printbounds)
+    ebits = _nbits(T)
     epad = 8 * sizeof(T) - ebits  # MSB padding bits in the embedded type
     option = get(nctx, :optional, nothing)
     claims = unclaimed_sentinel(nctx)
@@ -463,7 +469,7 @@ function compile_embed(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Vec
         nbits=ebits + presbits, fieldvar,
         desc="embedded $(T)", shortform=string(T),
         argvar, base_argtype=T, option,
-        sentinel, parsed=parsebounds(T)[1]:parsebounds(T)[2], printed=printbounds(T)[1]:printbounds(T)[2],
+        sentinel, parsed=_parsebounds(T)[1]:_parsebounds(T)[2], printed=_printbounds(T)[1]:_printbounds(T)[2],
         parse=parse_exprs,
         extract_setup=ExprVarLine[fextract], extract_value=fieldvar,
         impart_body=body, print=ExprVarLine[:(shortcode(io, $fieldvar))])
