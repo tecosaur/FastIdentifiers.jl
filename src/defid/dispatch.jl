@@ -3,44 +3,55 @@
 
 # Pattern dispatch and structural handlers (field capture, optional branching).
 
+## Segment registries
+
+const CORE_SEGMENTS = segment_set(
+    SegmentDef(:literal,    compile_literal,  (:casefold,)),
+    SegmentDef(:skip,       compile_skip,     (:casefold, :print)),
+    SegmentDef(:digits,     compile_digits,   (:base, :min, :max, :pad)),
+    SegmentDef(:letters,    compile_charseq,  (:upper, :lower, :casefold)),
+    SegmentDef(:alphnum,    compile_charseq,  (:upper, :lower, :casefold)),
+    SegmentDef(:hex,        compile_charseq,  (:upper, :lower, :casefold)),
+    SegmentDef(:charset,    compile_charseq,  (:upper, :lower, :casefold)),
+    SegmentDef(:embed,      compile_embed,    ()),
+)
+
+const ID_SEGMENTS = merge(CORE_SEGMENTS, segment_set(
+    SegmentDef(:choice,     compile_choice,     (:casefold, :is)),
+    SegmentDef(:checkdigit, compile_checkdigit, ()),
+))
+
+const GLOBAL_KWARGS = (:purlprefix,)
+
 ## Pattern dispatch
 
 function defid_dispatch!(exprs::IdExprs,
                          state::DefIdState, nctx::NodeCtx,
+                         segments::NamedTuple,
                          node::Any, args::Vector{Any})
     if node isa QuoteNode
-        defid_field!(exprs, state, nctx, node, args)
+        defid_field!(exprs, state, nctx, segments, node, args)
     elseif node === :seq
         for arg in args
-            defid_dispatch!(exprs, state, nctx, arg)
+            defid_dispatch!(exprs, state, nctx, segments, arg)
         end
     elseif node === :optional
-        defid_optional!(exprs, state, nctx, args)
-    elseif node === :skip
-        output = compile_skip(state, nctx, args)
-        if isempty(output.meta.desc)
+        defid_optional!(exprs, state, nctx, segments, args)
+    elseif haskey(segments, node)
+        def = getfield(segments, node)
+        # checkdigit needs exprs for field resolution
+        output = if node === :checkdigit
+            def.compile(exprs, state, nctx, def, args)
+        else
+            def.compile(state, nctx, def, args)
+        end
+        if node === :skip && isempty(output.meta.desc)
             # Skip without print: apply parse codegen and byte bounds only
             append!(exprs.parse, output.codegen.parse)
             inc_parsed!(nctx, first(output.bounds.parsed), last(output.bounds.parsed))
         else
-            process_segment_output!(exprs, state, nctx, :skip, output)
+            process_segment_output!(exprs, state, nctx, node, output)
         end
-    elseif node === :choice
-        defid_choice!(exprs, state, nctx, args)
-    elseif node === :literal
-        output = compile_literal(state, nctx, args)
-        process_segment_output!(exprs, state, nctx, :literal, output)
-    elseif node === :digits
-        output = compile_digits(state, nctx, args)
-        process_segment_output!(exprs, state, nctx, :digits, output)
-    elseif node in (:letters, :alphnum, :hex, :charset)
-        defid_charseq!(exprs, state, nctx, args, node)
-    elseif node === :embed
-        output = compile_embed(state, nctx, args)
-        process_segment_output!(exprs, state, nctx, :embed, output)
-    elseif node === :checkdigit
-        output = compile_checkdigit(exprs, state, nctx, args)
-        process_segment_output!(exprs, state, nctx, :checkdigit, output)
     else
         throw(ArgumentError("Unknown pattern node $node"))
     end
@@ -48,27 +59,29 @@ end
 
 function defid_dispatch!(exprs::IdExprs,
                          state::DefIdState, nctx::NodeCtx,
+                         segments::NamedTuple,
                          thing::Any)
+    all_kws = (all_kwargs(segments)..., GLOBAL_KWARGS...)
     if Meta.isexpr(thing, :tuple)
         args = Any[]
         for arg in thing.args
             if Meta.isexpr(arg, :(=), 2)
                 kwname, kwval = arg.args
-                kwname ∈ ALL_KNOWN_KEYS ||
-                    throw(ArgumentError("Unknown keyword argument $kwname. Known keyword arguments are: $(join(ALL_KNOWN_KEYS, ", "))"))
+                kwname ∈ all_kws ||
+                    throw(ArgumentError("Unknown keyword argument $kwname. Known keyword arguments are: $(join(all_kws, ", "))"))
                 nctx = NodeCtx(nctx, kwname, kwval)
             else
                 push!(args, arg)
             end
         end
-        defid_dispatch!(exprs, state, nctx, :seq, args)
+        defid_dispatch!(exprs, state, nctx, segments, :seq, args)
     elseif Meta.isexpr(thing, :call)
         name = first(thing.args)
         args = Any[]
-        nkeys = if name isa Symbol && haskey(KNOWN_KEYS, name)
-            KNOWN_KEYS[name]
+        nkeys = if name isa Symbol && haskey(segments, name)
+            segment_kwargs(segments, name)
         else
-            ALL_KNOWN_KEYS
+            all_kws
         end
         for arg in thing.args[2:end]
             if Meta.isexpr(arg, :kw, 2)
@@ -80,9 +93,10 @@ function defid_dispatch!(exprs::IdExprs,
                 push!(args, arg)
             end
         end
-        defid_dispatch!(exprs, state, nctx, name, args)
+        defid_dispatch!(exprs, state, nctx, segments, name, args)
     elseif thing isa String
-        output = compile_literal(state, nctx, Any[thing])
+        def = getfield(segments, :literal)
+        output = def.compile(state, nctx, def, Any[thing])
         process_segment_output!(exprs, state, nctx, :literal, output)
     elseif thing === :__first_nonskip
         root = nctx[:current_branch]
@@ -96,6 +110,7 @@ end
 
 function defid_field!(exprs::IdExprs,
                       state::DefIdState, nctx::NodeCtx,
+                      segments::NamedTuple,
                       node::QuoteNode,
                       args::Vector{Any})
     isnothing(get(nctx, :fieldvar, nothing)) || throw(ArgumentError("Fields may not be nested"))
@@ -103,7 +118,7 @@ function defid_field!(exprs::IdExprs,
     initial_segs = length(exprs.segments)
     initialprints = length(exprs.print)
     for arg in args
-        defid_dispatch!(exprs, state, nctx, arg)
+        defid_dispatch!(exprs, state, nctx, segments, arg)
     end
     new_value_segs = filter(s -> !isnothing(s.argtype), @view exprs.segments[initial_segs+1:end])
     isempty(new_value_segs) && throw(ArgumentError("Field $(node.value) does not capture any value"))
@@ -126,6 +141,7 @@ end
 
 function defid_optional!(exprs::IdExprs,
                          state::DefIdState, nctx::NodeCtx,
+                         segments::NamedTuple,
                          args::Vector{Any})
     popt = get(nctx, :optional, nothing)
     optvar = gensym("optional")
@@ -146,10 +162,12 @@ function defid_optional!(exprs::IdExprs,
     bits_before = state.bits
     oexprs = (; parse = ExprVarLine[], print = ExprVarLine[], segments = exprs.segments, properties = exprs.properties)
     if all(a -> a isa String, args)
-        defid_choice!(oexprs, state, nctx, push!(Any[join(Vector{String}(args))], ""))
+        def = getfield(segments, :choice)
+        output = def.compile(state, nctx, def, push!(Any[join(Vector{String}(args))], ""))
+        process_segment_output!(oexprs, state, nctx, :choice, output)
     else
         for arg in args
-            defid_dispatch!(oexprs, state, nctx, arg)
+            defid_dispatch!(oexprs, state, nctx, segments, arg)
         end
     end
     seg_end = length(exprs.segments)

@@ -9,7 +9,7 @@ using FastIdentifiers: FastIdentifiers, AbstractIdentifier, MalformedIdentifier,
 
 include("../packed/PackedParsers.jl")
 using .PackedParsers: SentinelSpec, SegmentBounds, SegmentCodegen, SegmentMeta,
-    SegmentOutput, SegmentDef, segment_set, all_kwargs
+    SegmentOutput, SegmentDef, segment_set, segment_kwargs, all_kwargs
 
 include("utils.jl")
 include("core.jl")
@@ -64,13 +64,15 @@ julia> (id.id, id.version, id.participants)
 ```
 """
 macro defid(name, pattern, args...)
+    segments = ID_SEGMENTS
+    all_kws = (all_kwargs(segments)..., GLOBAL_KWARGS...)
     casefold_val = true
     prefix_val = nothing
     for arg in args
         Meta.isexpr(arg, :(=), 2) || throw(ArgumentError("Expected keyword arguments of the form key=value, got $arg"))
         kwname, kwval = arg.args
-        kwname ∈ ALL_KNOWN_KEYS ||
-            throw(ArgumentError("Unknown keyword argument $kwname. Known keyword arguments are: $(join(ALL_KNOWN_KEYS, ", "))"))
+        kwname ∈ all_kws ||
+            throw(ArgumentError("Unknown keyword argument $kwname. Known keyword arguments are: $(join(all_kws, ", "))"))
         kwname === :casefold && (casefold_val = kwval)
         kwname === :purlprefix && (prefix_val = kwval)
     end
@@ -79,10 +81,10 @@ macro defid(name, pattern, args...)
     nctx = NodeCtx(:current_branch, root)
     exprs = IdExprs(([], [], [], []))
     if !isnothing(prefix_val)
-        defid_dispatch!(exprs, state, nctx, Expr(:call, :skip, lowercase(prefix_val)))
+        defid_dispatch!(exprs, state, nctx, segments, Expr(:call, :skip, lowercase(prefix_val)))
     end
-    defid_dispatch!(exprs, state, nctx, :__first_nonskip)
-    defid_dispatch!(exprs, state, nctx, pattern)
+    defid_dispatch!(exprs, state, nctx, segments, :__first_nonskip)
+    defid_dispatch!(exprs, state, nctx, segments, pattern)
     defid_make(exprs, state, name)
 end
 

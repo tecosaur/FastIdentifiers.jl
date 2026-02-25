@@ -8,7 +8,7 @@
 
 ## SegmentOutput-returning handlers
 
-function compile_literal(state::DefIdState, nctx::NodeCtx, args::Vector{Any})
+function compile_literal(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Vector{Any})
     length(args) == 1 || throw(ArgumentError("Expected exactly one argument for literal, got $(length(args))"))
     lit = args[1]
     lit isa String || throw(ArgumentError("Expected a string literal for literal, got $lit"))
@@ -40,7 +40,7 @@ function compile_literal(state::DefIdState, nctx::NodeCtx, args::Vector{Any})
         SegmentMeta(:literal, sprint(show, lit), lit, nothing, nothing))
 end
 
-function compile_skip(state::DefIdState, nctx::NodeCtx, args::Vector{Any})
+function compile_skip(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Vector{Any})
     all(a -> a isa String, args) || throw(ArgumentError("Expected all arguments to be strings for skip"))
     pval = get(nctx, :print, nothing)
     sargs = Vector{String}(args)

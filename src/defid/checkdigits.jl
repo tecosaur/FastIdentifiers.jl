@@ -11,7 +11,7 @@
 
 function compile_checkdigit(exprs::IdExprs,
                             state::DefIdState, nctx::NodeCtx,
-                            args::Vector{Any})
+                            ::SegmentDef, args::Vector{Any})
     !isnothing(get(nctx, :optional, nothing)) &&
         throw(ArgumentError("checkdigit cannot appear inside optional(...)"))
     !isnothing(state.checksum) &&

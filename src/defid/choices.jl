@@ -7,24 +7,22 @@
 ## Choice pattern handler
 
 """
-    defid_choice!(exprs, state, nctx, options)
+    compile_choice(state, nctx, def, options) -> SegmentOutput
 
 Handle a `choice(...)` pattern node.
 
 Validates options, builds a matcher (via perfect hashing or linear scan),
 then delegates to `compile_choice_value` or `compile_choice_fixed`.
 """
-function defid_choice!(exprs::IdExprs,
-                       state::DefIdState, nctx::NodeCtx,
-                       options::Vector{Any})
+function compile_choice(state::DefIdState, nctx::NodeCtx,
+                        ::SegmentDef, options::Vector{Any})
     all(o -> o isa String, options) || throw(ArgumentError("Expected all options to be strings for choice"))
     ctx = choice_setup(state, nctx, options)
-    output = if isnothing(ctx.target)
+    if isnothing(ctx.target)
         compile_choice_value(state, nctx, ctx)
     else
         compile_choice_fixed(state, nctx, ctx)
     end
-    process_segment_output!(exprs, state, nctx, :choice, output)
 end
 
 function choice_setup(state::DefIdState, nctx::NodeCtx, options::Vector{Any})

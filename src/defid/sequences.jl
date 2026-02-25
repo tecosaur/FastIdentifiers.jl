@@ -7,7 +7,7 @@
 
 ## Digits
 
-function compile_digits(state::DefIdState, nctx::NodeCtx, args::Vector{Any})
+function compile_digits(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Vector{Any})
     length(args) ∈ (0, 1) || throw(ArgumentError("Expected at most one positional argument for digits, got $(length(args))"))
     base = get(nctx, :base, 10)::Int
     min = get(nctx, :min, 0)::Int
@@ -153,8 +153,9 @@ const NAMED_CHARSETS = (
     hex     = (UInt8('0'):UInt8('9'), UInt8('A'):UInt8('F')),
 )
 
-function defid_charseq!(exprs::IdExprs, state::DefIdState, nctx::NodeCtx,
-                        args::Vector{Any}, kind::Symbol)
+function compile_charseq(state::DefIdState, nctx::NodeCtx,
+                         def::SegmentDef, args::Vector{Any})
+    kind = def.name
     named = haskey(NAMED_CHARSETS, kind)
     minargs = named ? 1 : 2
     length(args) >= minargs || throw(ArgumentError(
@@ -165,8 +166,7 @@ function defid_charseq!(exprs::IdExprs, state::DefIdState, nctx::NodeCtx,
     minlen, maxlen = parse_charseq_length(first(args), kind)
     base_ranges = named ? NAMED_CHARSETS[kind] : parse_charset_ranges(args)
     ranges, cfold = resolve_charseq_flags(state, nctx, kind, base_ranges)
-    output = compile_charseq(state, nctx, minlen, maxlen, ranges, cfold, kind)
-    process_segment_output!(exprs, state, nctx, kind, output)
+    compile_charseq_impl(state, nctx, minlen, maxlen, ranges, cfold, kind)
 end
 
 function parse_charseq_length(arg, kind::Symbol)
@@ -253,10 +253,10 @@ function collapse_letter_ranges(ranges, target::Symbol)
     sort!(out; by=first)
 end
 
-function compile_charseq(state::DefIdState, nctx::NodeCtx,
-                         minlen::Int, maxlen::Int,
-                         ranges::Vector{UnitRange{UInt8}},
-                         cfold::Bool, kind::Symbol)
+function compile_charseq_impl(state::DefIdState, nctx::NodeCtx,
+                              minlen::Int, maxlen::Int,
+                              ranges::Vector{UnitRange{UInt8}},
+                              cfold::Bool, kind::Symbol)
     ranges = Tuple(ranges)  # runtime functions dispatch on NTuple
     variable = minlen != maxlen
     option = get(nctx, :optional, nothing)
@@ -410,7 +410,7 @@ end
 
 ## Embedded identifier types
 
-function compile_embed(state::DefIdState, nctx::NodeCtx, args::Vector{Any})
+function compile_embed(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Vector{Any})
     length(args) == 1 || throw(ArgumentError("embed takes exactly one argument (the identifier type)"))
     T = Core.eval(state.mod, args[1])
     T isa DataType && T <: AbstractIdentifier && isprimitivetype(T) ||

@@ -81,22 +81,6 @@ mutable struct DefIdState
     const segment_outputs::Vector{Pair{Symbol, SegmentOutput}}
 end
 
-## Constants
-
-const KNOWN_KEYS = (
-    choice = (:casefold, :is),
-    digits = (:base, :min, :max, :pad),
-    letters = (:upper, :lower, :casefold),
-    alphnum = (:upper, :lower, :casefold),
-    hex = (:upper, :lower, :casefold),
-    charset = (:upper, :lower, :casefold),
-    skip = (:casefold, :print),
-    checkdigit = (),
-    _global = (:purlprefix,),
-)
-
-const ALL_KNOWN_KEYS = Tuple(unique(collect(Iterators.flatten(values(KNOWN_KEYS)))))
-
 ## Bit-sizing
 
 """
