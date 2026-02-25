@@ -59,7 +59,7 @@ struct SegmentCodegen
 end
 
 """
-    SegmentMeta(label, desc, shortform, argtype, argvar)
+    SegmentMeta(label, desc, shortform, argtype, argvar[, context])
 
 Metadata describing a segment for introspection and error messages.
 
@@ -68,6 +68,7 @@ Metadata describing a segment for introspection and error messages.
 - `shortform`: compact pattern notation (e.g. "0-9 x 4")
 - `argtype`: constructor parameter type (:Integer, :Symbol, :AbstractString, or nothing)
 - `argvar`: gensym used as parameter placeholder in impart (nothing for non-value segments)
+- `context`: handler-specific data for finalize hooks (nothing by default)
 """
 struct SegmentMeta
     label::Symbol                # field name or gensym for anonymous
@@ -75,7 +76,10 @@ struct SegmentMeta
     shortform::String            # compact pattern notation for error messages
     argtype::Any                 # :Integer, :Symbol, :AbstractString, or nothing
     argvar::Union{Nothing, Symbol} # parameter placeholder in impart
+    context::Any                 # handler-specific data for finalize hooks
 end
+SegmentMeta(label, desc, shortform, argtype, argvar) =
+    SegmentMeta(label, desc, shortform, argtype, argvar, nothing)
 
 """
     SegmentOutput(bounds, codegen, meta)

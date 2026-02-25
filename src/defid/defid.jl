@@ -24,6 +24,28 @@ include("checkdigits.jl")
 include("dispatch.jl")
 
 """
+    deftype(segments, mod, name, pattern; casefold, purlprefix) -> Expr(:toplevel, ...)
+
+Workhorse function for `@defid`. Walks the pattern AST, dispatches to
+segment handlers via `segments`, and assembles all method definitions.
+
+Returns a `:toplevel` expression block ready for `eval`.
+"""
+function deftype(segments::NamedTuple, mod::Module, name::Symbol, pattern;
+                 casefold::Bool = true, purlprefix::Union{Nothing, String} = nothing)
+    root = ParseBranch(1, nothing, nothing, 0, 0, 0, 0, 0)
+    state = DefIdState(name, mod, 0, casefold, purlprefix, ParseBranch[root], String[], Pair{Symbol, SegmentOutput}[])
+    nctx = NodeCtx(:current_branch, root)
+    exprs = IdExprs(([], [], [], []))
+    if !isnothing(purlprefix)
+        defid_dispatch!(exprs, state, nctx, segments, Expr(:call, :skip, lowercase(purlprefix)))
+    end
+    defid_dispatch!(exprs, state, nctx, segments, :__first_nonskip)
+    defid_dispatch!(exprs, state, nctx, segments, pattern)
+    defid_make(exprs, state, name, segments)
+end
+
+"""
     @defid name pattern [kwarg=value...]
 
 Define a bit-packed identifier type `name` with parsing and printing `pattern`.
@@ -76,16 +98,8 @@ macro defid(name, pattern, args...)
         kwname === :casefold && (casefold_val = kwval)
         kwname === :purlprefix && (prefix_val = kwval)
     end
-    root = ParseBranch(1, nothing, nothing, 0, 0, 0, 0, 0)
-    state = DefIdState(name, __module__, 0, casefold_val, prefix_val, ParseBranch[root], String[], nothing, Pair{Symbol, SegmentOutput}[])
-    nctx = NodeCtx(:current_branch, root)
-    exprs = IdExprs(([], [], [], []))
-    if !isnothing(prefix_val)
-        defid_dispatch!(exprs, state, nctx, segments, Expr(:call, :skip, lowercase(prefix_val)))
-    end
-    defid_dispatch!(exprs, state, nctx, segments, :__first_nonskip)
-    defid_dispatch!(exprs, state, nctx, segments, pattern)
-    defid_make(exprs, state, name)
+    deftype(segments, __module__, name, pattern;
+            casefold = casefold_val, purlprefix = prefix_val)
 end
 
 end

@@ -14,7 +14,7 @@ function compile_checkdigit(exprs::IdExprs,
                             ::SegmentDef, args::Vector{Any})
     !isnothing(get(nctx, :optional, nothing)) &&
         throw(ArgumentError("checkdigit cannot appear inside optional(...)"))
-    !isnothing(state.checksum) &&
+    any(p -> first(p) === :checkdigit, state.segment_outputs) &&
         throw(ArgumentError("Only one checkdigit per type is allowed"))
     length(args) == 2 || throw(ArgumentError(
         "checkdigit requires exactly 2 positional arguments: (:field, fn), got $(length(args))"))
@@ -36,9 +36,8 @@ function compile_checkdigit(exprs::IdExprs,
     builtin = fn_expr isa Symbol && isdefined(Checksums, fn_expr)
     fn_resolved = builtin ? getfield(Checksums, fn_expr) : Core.eval(state.mod, fn_expr)
     fn_ref = builtin ? GlobalRef(Checksums, fn_expr) : esc(fn_expr)
-    # Side effect: register checksum info (used by defid_make for idchecksum/idcode)
-    state.checksum = ChecksumInfo((fn_ref, seg_idx,
-                                   Checksums.parse_byte(fn_resolved, :checkbyte, nctx)))
+    checksum_info = ChecksumInfo((fn_ref, seg_idx,
+                                  Checksums.parse_byte(fn_resolved, :checkbyte, nctx)))
     # Parse codegen
     checkpos = gensym("checkpos")
     checkbyte = gensym("checkbyte")
@@ -67,7 +66,40 @@ function compile_checkdigit(exprs::IdExprs,
         SegmentBounds(1:1, 1:1, 0, nothing),
         SegmentCodegen(parse_exprs, ExprVarLine[], print_detect, Any[],
                        ExprVarLine[:(write(io, $val_to_byte))]),
-        SegmentMeta(:checkdigit, "check digit", "check", nothing, nothing))
+        SegmentMeta(:checkdigit, "check digit", "check", nothing, nothing, checksum_info))
+end
+
+## Checkdigit finalize hook
+
+"""
+    finalize_checkdigit!(block, exprs, state, name)
+
+Post-assembly finalize hook for the checkdigit segment.
+
+Generates `idchecksum` and `idcode` methods, and patches `parse`/`tryparse`
+to handle checksum violations (negative pos from `__checksum_gate`).
+"""
+function finalize_checkdigit!(block::Expr, exprs::IdExprs,
+                              state::DefIdState, name::Symbol)
+    idx = findfirst(p -> first(p) === :checkdigit, state.segment_outputs)
+    isnothing(idx) && return
+    output = last(state.segment_outputs[idx])
+    info = output.meta.context::ChecksumInfo
+    (; fn, field_seg_idx) = info
+    seg = exprs.segments[field_seg_idx]
+    # idchecksum: extract the field value, apply the checksum function
+    cs_extract = map(copy, seg.extract)
+    implement_casting!(state, cs_extract)
+    cs_value = last(cs_extract)
+    push!(block.args,
+          :(function $(GlobalRef(FastIdentifiers, :idchecksum))(id::$(esc(name)))
+                $(cs_extract[1:end-1]...)
+                $fn($cs_value)
+            end),
+          :(function $(GlobalRef(FastIdentifiers, :idcode))(id::$(esc(name)))
+                $(cs_extract[1:end-1]...)
+                $cs_value
+            end))
 end
 
 ## Checksums module — protocol and standard checksum functions

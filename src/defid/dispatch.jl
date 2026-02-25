@@ -18,7 +18,7 @@ const CORE_SEGMENTS = segment_set(
 
 const ID_SEGMENTS = merge(CORE_SEGMENTS, segment_set(
     SegmentDef(:choice,     compile_choice,     (:casefold, :is)),
-    SegmentDef(:checkdigit, compile_checkdigit, ()),
+    SegmentDef(:checkdigit, compile_checkdigit, (), finalize_checkdigit!),
 ))
 
 const GLOBAL_KWARGS = (:purlprefix,)

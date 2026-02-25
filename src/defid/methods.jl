@@ -12,16 +12,17 @@
 ## Top-level assembly
 
 """
-    defid_make(exprs, state, name) -> Expr(:toplevel, ...)
+    defid_make(exprs, state, name, segments) -> Expr(:toplevel, ...)
 
 Assemble all method definitions for the generated identifier type.
 
 Produces the primitive type declaration and methods for `parsebytes`,
 `parse`, `tryparse`, `shortcode`, `tobytes`, `propertynames`,
 `getproperty`, `segments`, the positional constructor, `show`, `isless`,
-and optionally `purlprefix`.
+and optionally `purlprefix`. Runs finalize hooks from the segment registry.
 """
-function defid_make(exprs::IdExprs, state::DefIdState, name::Symbol)
+function defid_make(exprs::IdExprs, state::DefIdState, name::Symbol,
+                    segments::NamedTuple = (;))
     block = Expr(:toplevel)
     numbits = 8 * cld(state.bits, 8)
     implement_casting!(state, exprs.print)
@@ -46,23 +47,17 @@ function defid_make(exprs::IdExprs, state::DefIdState, name::Symbol)
         push!(block.args,
               :($(GlobalRef(FastIdentifiers, :purlprefix))(::Type{$(esc(name))}) = $(state.purlprefix)))
     end
-    if !isnothing(state.checksum)
-        (; fn, field_seg_idx) = state.checksum
-        seg = exprs.segments[field_seg_idx]
-        # idchecksum: extract the field value, apply the checksum function
-        cs_extract = map(copy, seg.extract)
-        implement_casting!(state, cs_extract)
-        cs_value = last(cs_extract)
-        push!(block.args,
-              :(function $(GlobalRef(FastIdentifiers, :idchecksum))(id::$(esc(name)))
-                    $(cs_extract[1:end-1]...)
-                    $fn($cs_value)
-                end),
-              # idcode: return the field value directly
-              :(function $(GlobalRef(FastIdentifiers, :idcode))(id::$(esc(name)))
-                    $(cs_extract[1:end-1]...)
-                    $cs_value
-                end))
+    # Run finalize hooks from the segment registry
+    seen_kinds = Set{Symbol}()
+    for (kind, _) in state.segment_outputs
+        kind ∈ seen_kinds && continue
+        push!(seen_kinds, kind)
+        if haskey(segments, kind)
+            def = getfield(segments, kind)
+            if !isnothing(def.finalize)
+                def.finalize(block, exprs, state, name)
+            end
+        end
     end
     push!(block.args, esc(name))
     block
@@ -112,10 +107,14 @@ end
 function defid_parse(state::DefIdState, name::Symbol)
     errmsgs = Tuple(state.errconsts)
     ename = esc(name)
-    has_checksum = !isnothing(state.checksum)
+    checkdigit_output = let idx = findfirst(p -> first(p) === :checkdigit, state.segment_outputs)
+        isnothing(idx) ? nothing : last(state.segment_outputs[idx])
+    end
+    has_checksum = !isnothing(checkdigit_output)
     parse_body = if has_checksum
-        fn_ref = state.checksum.fn
-        byte_to_val = state.checksum.parse_expr
+        info = checkdigit_output.meta.context::ChecksumInfo
+        fn_ref = info.fn
+        byte_to_val = info.parse_expr
         quote
             result, pos = parsebytes($ename, codeunits(id))
             if result isa $ename

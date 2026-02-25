@@ -77,7 +77,6 @@ mutable struct DefIdState
     const purlprefix::Union{Nothing, String}
     const branches::Vector{ParseBranch}
     const errconsts::Vector{String}
-    checksum::Union{Nothing, ChecksumInfo}
     const segment_outputs::Vector{Pair{Symbol, SegmentOutput}}
 end
 
