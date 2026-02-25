@@ -1655,7 +1655,7 @@ ttypeof(x) = typeof(x)
             # value node fails, pos must rewind for "xy" to match.
             iddef = :(@defid OptRewind (:id(digits(max=99)),
                        optional("x", :extra(digits(max=9))), "xy"))
-            @test parsebytes_complexity(iddef) == (branches=5:8, branch_total=8, ops=26:42)
+            @test parsebytes_complexity(iddef) == (branches=5:8, branch_total=8, ops=28:44)
             eval(iddef)
             # Optional absent, trailing literal matches after rewind
             @test parse(OptRewind, "42xy").id == 42
@@ -1664,7 +1664,7 @@ ttypeof(x) = typeof(x)
             @test parse(OptRewind, "42x5xy").id == 42
             @test parse(OptRewind, "42x5xy").extra == 5
             # Mid-optional failure still rejects malformed input
-            @test_broken tryparse(OptRewind, "42x") === nothing
+            @test tryparse(OptRewind, "42x") === nothing
             @test tryparse(OptRewind, "42") === nothing
             check_roundtrips(OptRewind, ("42xy", "42x0xy", "42x9xy"))
             @test_neverthrow parsebytes(OptRewind, ::Vector{UInt8})

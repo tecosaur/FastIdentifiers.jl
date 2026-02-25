@@ -12,19 +12,19 @@
 ## Top-level assembly
 
 """
-    assemble_type(exprs, state, name, segments; finalize!) -> Expr(:toplevel, ...)
+    assemble_type(exprs, state, name, segments; finalize_fn) -> Expr(:toplevel, ...)
 
 Assemble all method definitions for the generated type.
 
 Produces the primitive type declaration and methods for `parsebytes`,
 `tobytes`, `propertynames`, `getproperty`, `segments`, the positional
 constructor, `show`, and `isless`. Runs finalize hooks from the segment
-registry, then calls `finalize!` for domain-specific method generation
+registry, then calls `finalize_fn` for domain-specific method generation
 (e.g. parse/tryparse, shortcode, purlprefix).
 """
 function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
                        segments::NamedTuple = (;);
-                       finalize!::Function = default_finalize!)
+                       finalize_fn::Function = default_finalize!)
     block = Expr(:toplevel)
     numbits = 8 * cld(state.bits, 8)
     implement_casting!(state, exprs.print)
@@ -36,6 +36,9 @@ function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
           :($(GlobalRef(M, :parsebounds))(::Type{$(esc(name))}) = $((root.parsed_min, root.parsed_max))),
           :($(GlobalRef(M, :printbounds))(::Type{$(esc(name))}) = $((root.print_min, root.print_max))),
           assemble_parsebytes(exprs.parse, exprs.segments, state, name),
+          assemble_tobytes(exprs.print, state, name),
+          assemble_print(exprs.print, state, name),
+          assemble_string(state, name),
           :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $(Tuple(map(first, exprs.properties)))),
           assemble_properties(exprs.properties, exprs.segments, state, name),
           assemble_segments_type(exprs.segments, state, name),
@@ -45,7 +48,7 @@ function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
           :($(GlobalRef(Base, :isless))(a::$(esc(name)), b::$(esc(name))) =
                 Core.Intrinsics.ult_int(a, b)))
     # Domain-specific finalization (parse/tryparse, shortcode, purlprefix, etc.)
-    finalize!(block, exprs, state, name)
+    finalize_fn(block, exprs, state, name)
     # Run finalize hooks from the segment registry
     seen_kinds = Set{Symbol}()
     for (kind, _) in state.segment_outputs
@@ -58,6 +61,9 @@ function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
             end
         end
     end
+    # Qualify bare references to PackedParselets runtime functions so that
+    # generated code works when eval'd in any module.
+    qualify_runtime_refs!(block, PackedParselets)
     push!(block.args, esc(name))
     block
 end
@@ -118,7 +124,7 @@ function assemble_tobytes(pexprs::Vector{ExprVarLine}, state::ParserState, name:
     # stripping __segment_printed assignments used only by segments()
     bufexprs = map(strip_segsets! ∘ copy, pexprs)
     filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, bufexprs)
-    rewrite_bufprint!(bufexprs)
+    rewrite_bufprint!(bufexprs, M)
     :(function $(GlobalRef(M, :tobytes))(id::$(esc(name)))
           buf = $(if fixedlen
                       :(Base.StringMemory($maxbytes))
@@ -129,6 +135,49 @@ function assemble_tobytes(pexprs::Vector{ExprVarLine}, state::ParserState, name:
           $(bufexprs...)
           buf, pos
       end)
+end
+
+## print / string
+
+function assemble_print(pexprs::Vector{ExprVarLine}, state::ParserState, name::Symbol)
+    ioexprs = map(strip_segsets! ∘ copy, pexprs)
+    filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, ioexprs)
+    # Resolve __tobytes_print(io, ...) markers to print(io, ...) for the IO path
+    resolve_print_markers!(ioexprs)
+    :(function $(GlobalRef(Base, :print))(io::IO, id::$(esc(name)))
+          $(ioexprs...)
+      end)
+end
+
+function assemble_string(state::ParserState, name::Symbol)
+    root = state.branches[1]
+    fixedlen = root.print_min == root.print_max
+    M = state.method_module
+    if fixedlen
+        :(function $(GlobalRef(Base, :string))(id::$(esc(name)))
+              buf, _ = $(GlobalRef(M, :tobytes))(id)
+              Base.unsafe_takestring(buf)
+          end)
+    else
+        :(function $(GlobalRef(Base, :string))(id::$(esc(name)))
+              buf, len = $(GlobalRef(M, :tobytes))(id)
+              str = Base.StringMemory(len)
+              Base.unsafe_copyto!(pointer(str), pointer(buf), len)
+              Base.unsafe_takestring(str)
+          end)
+    end
+end
+
+# Replace __tobytes_print(io, ...) markers with print(io, ...) for the IO code path.
+function resolve_print_markers!(exprs)
+    for (i, expr) in enumerate(exprs)
+        expr isa Expr || continue
+        if Meta.isexpr(expr, :call) && length(expr.args) >= 2 && expr.args[1] == :__tobytes_print
+            expr.args[1] = :print
+        else
+            resolve_print_markers!(expr.args)
+        end
+    end
 end
 
 ## getproperty
@@ -253,7 +302,7 @@ function assemble_show(segs::Vector{ValueSegment},
               if get(io, :typeinfo, Nothing) != $(esc(name))
                   print(io, $(QuoteNode(name)), ':')
               end
-              shortcode(io, id)
+              print(io, id)
           else
               show(io, $(esc(name)))
               print(io, '(')
@@ -366,7 +415,8 @@ into direct `Memory{UInt8}` buffer operations (`bufprint`, `bufprintchars`,
 
 Recurses into nested expressions. Modifies `pexprs` in place.
 """
-function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
+function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}},
+                           method_module::Module = PackedParselets)
     splices = Tuple{Int, Vector{Any}}[]
     for (i, expr) in enumerate(pexprs)
         if Meta.isexpr(expr, :call) && length(expr.args) >= 3 && expr.args[2] == :io
@@ -377,10 +427,11 @@ function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
                 Any[:(buf[pos += 1] = $(args[1]))]
             elseif fname == :printchars
                 Any[:(pos = bufprintchars(buf, pos, $(args...)))]
-            elseif fname == :shortcode
+            elseif fname == :__tobytes_print
+                tobytes_ref = GlobalRef(method_module, :tobytes)
                 ebuf = gensym("ebuf")
                 elen = gensym("elen")
-                Any[:(($ebuf, $elen) = tobytes($(args...))),
+                Any[:(($ebuf, $elen) = $tobytes_ref($(args...))),
                     :(Base.unsafe_copyto!(pointer(buf, pos + 1), pointer($ebuf), $elen)),
                     :(pos += $elen)]
             end
@@ -388,7 +439,7 @@ function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
         elseif expr isa Expr
             for arg in expr.args
                 if arg isa Expr
-                    rewrite_bufprint!(arg.args)
+                    rewrite_bufprint!(arg.args, method_module)
                 end
             end
         end
@@ -437,6 +488,43 @@ function bufprint_static(str::String)
                   :(pos += $width))
         end
     end
+end
+
+## Runtime reference qualification
+
+# PackedParselets runtime symbols that appear bare in generated code.
+# These must be qualified with GlobalRef when the generated code is
+# eval'd outside the DefId module (which normally imports them).
+# Note: parsebytes/tobytes are excluded — they are API functions whose
+# method definitions already use GlobalRef(state.method_module, ...).
+# Bare references to them in finalize hooks are the hook author's
+# responsibility (defid uses GlobalRef explicitly, test hooks use PP.parsebytes).
+const RUNTIME_SYMS = Set{Symbol}([
+    :parsechars, :parseint, :printchars, :chars2string,
+    :bufprint, :bufprintchars, :takestring!,
+])
+
+"""
+    qualify_runtime_refs!(expr, mod)
+
+Walk `expr` and replace bare calls to known PackedParselets runtime
+functions with `GlobalRef(mod, name)`. This ensures generated code
+works when eval'd in any module, not just one that imports these symbols.
+"""
+function qualify_runtime_refs!(expr::Expr, mod::Module)
+    for (i, arg) in enumerate(expr.args)
+        if arg isa Symbol && arg ∈ RUNTIME_SYMS
+            # Only qualify call-position symbols (first arg of :call)
+            # and assignment targets that are function calls
+            if (Meta.isexpr(expr, :call) && i == 1) ||
+               (Meta.isexpr(expr, :., 2) && i == 2)
+                expr.args[i] = GlobalRef(mod, arg)
+            end
+        elseif arg isa Expr
+            qualify_runtime_refs!(arg, mod)
+        end
+    end
+    expr
 end
 
 ## Default finalize (generic parse/tryparse with ArgumentError)

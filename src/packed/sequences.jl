@@ -446,7 +446,7 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::Ve
     eshifted = Symbol("$(fieldvar)_shifted")
     pack = emit_pack(state, T, eshifted, nbits_pos - presbits)
     parse_exprs = ExprVarLine[
-          :(($eresult, $epos) = parsebytes($T, @view idbytes[pos:end])),
+          :(($eresult, $epos) = $(GlobalRef(M, :parsebytes))($T, @view idbytes[pos:end])),
           :(if !($eresult isa $T); $(notfound...) end),
           :($eshifted = $(to_lsb(eresult))),
           pack]
@@ -472,5 +472,5 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::Ve
         sentinel, parsed=_parsebounds(T)[1]:_parsebounds(T)[2], printed=_printbounds(T)[1]:_printbounds(T)[2],
         parse=parse_exprs,
         extract_setup=ExprVarLine[fextract], extract_value=fieldvar,
-        impart_body=body, print=ExprVarLine[:(shortcode(io, $fieldvar))])
+        impart_body=body, print=ExprVarLine[:(__tobytes_print(io, $fieldvar))])
 end
