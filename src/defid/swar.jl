@@ -399,14 +399,14 @@ function gen_rangecheck(var::Symbol, dspec::NamedTuple, state::DefIdState)
     if !needsmax && !needsmin
         :()
     elseif needsmax && !needsmin
-        maxerr = defid_errmsg(state, "Expected at most a value of $(string(max; base, pad))")
+        maxerr = register_errmsg(state, "Expected at most a value of $(string(max; base, pad))")
         :($var <= $max || return ($maxerr, pos))
     elseif needsmin && !needsmax
-        minerr = defid_errmsg(state, "Expected at least a value of $(string(min; base, pad))")
+        minerr = register_errmsg(state, "Expected at least a value of $(string(min; base, pad))")
         :($var >= $min || return ($minerr, pos))
     else
-        maxerr = defid_errmsg(state, "Expected at most a value of $(string(max; base, pad))")
-        minerr = defid_errmsg(state, "Expected at least a value of $(string(min; base, pad))")
+        maxerr = register_errmsg(state, "Expected at most a value of $(string(max; base, pad))")
+        minerr = register_errmsg(state, "Expected at least a value of $(string(min; base, pad))")
         :($var >= $min || return ($minerr, pos); $var <= $max || return ($maxerr, pos))
     end
 end
@@ -433,7 +433,7 @@ function compute_digit_vocab(fieldvar::Symbol, option,
     parsevar = if directvar; fnum else fieldvar end
     rangecheck = gen_rangecheck(fnum, dspec, state)
     # Error message and failure expression for digit count violations
-    errmsg = defid_errmsg(state,
+    errmsg = register_errmsg(state,
         if fixedwidth && maxdigits > 1
             "exactly $maxdigits digits in base $base"
         elseif mindigits > 1

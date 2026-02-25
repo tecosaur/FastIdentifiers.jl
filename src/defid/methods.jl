@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # Final-stage codegen: assemble complete method definitions from the
-# accumulated IdExprs (parse, print, segments, properties) produced
+# accumulated PatternExprs (parse, print, segments, properties) produced
 # by pattern walking.
 #
 # Each `defid_*` function here emits one or more method definitions
@@ -21,7 +21,7 @@ Produces the primitive type declaration and methods for `parsebytes`,
 `getproperty`, `segments`, the positional constructor, `show`, `isless`,
 and optionally `purlprefix`. Runs finalize hooks from the segment registry.
 """
-function defid_make(exprs::IdExprs, state::DefIdState, name::Symbol,
+function defid_make(exprs::PatternExprs, state::DefIdState, name::Symbol,
                     segments::NamedTuple = (;))
     block = Expr(:toplevel)
     numbits = 8 * cld(state.bits, 8)
@@ -43,9 +43,10 @@ function defid_make(exprs::IdExprs, state::DefIdState, name::Symbol,
           defid_show(exprs.segments, exprs.properties, state, name),
           :($(GlobalRef(Base, :isless))(a::$(esc(name)), b::$(esc(name))) =
                 Core.Intrinsics.ult_int(a, b)))
-    if !isnothing(state.purlprefix)
+    prefix = get(state.globals, :purlprefix, nothing)
+    if !isnothing(prefix)
         push!(block.args,
-              :($(GlobalRef(FastIdentifiers, :purlprefix))(::Type{$(esc(name))}) = $(state.purlprefix)))
+              :($(GlobalRef(FastIdentifiers, :purlprefix))(::Type{$(esc(name))}) = $prefix))
     end
     # Run finalize hooks from the segment registry
     seen_kinds = Set{Symbol}()
@@ -65,7 +66,7 @@ end
 
 ## parsebytes / parse / tryparse
 
-function defid_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{IdValueSegment},
+function defid_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{ValueSegment},
                           state::DefIdState, name::Symbol)
     parsed_min = state.branches[1].parsed_min
     # Primary pass: optimal length-check insertion with sentinel resolution
@@ -82,7 +83,7 @@ function defid_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{IdValueS
     end
     # Replace the root __branch_check sentinel with an upfront minimum-length check
     formstr = segments_formstring(segments, state.branches)
-    errmsg = defid_errmsg(state, string(
+    errmsg = register_errmsg(state, string(
         "Expected at least ", parsed_min, " bytes",
         isempty(formstr) ? "" : string(", must match the form '", formstr, "'")))
     split_idx = findfirst(resolved) do e
@@ -205,7 +206,7 @@ end
 ## getproperty
 
 function defid_properties(properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
-                          segs::Vector{IdValueSegment},
+                          segs::Vector{ValueSegment},
                           state::DefIdState, name::Symbol)
     isempty(properties) && return :()
     resolved = resolve_property_segments(properties, segs)
@@ -228,7 +229,7 @@ end
 
 ## Constructor
 
-function defid_constructor(segs::Vector{IdValueSegment},
+function defid_constructor(segs::Vector{ValueSegment},
                           properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
                           state::DefIdState, name::Symbol)
     resolved = resolve_property_segments(properties, segs)
@@ -274,16 +275,12 @@ end
 # Validate optional scope nesting: a child scope's args must not be
 # specified when the parent scope's args are nothing.
 function constructor_scope_checks(args::Vector{Tuple{Symbol, Int}},
-                                  segs::Vector{IdValueSegment},
+                                  segs::Vector{ValueSegment},
                                   state::DefIdState)
-    scope_parents = Dict{Symbol, Union{Nothing, Symbol}}()
+    scope_parents = Dict{Symbol, Symbol}()
     for b in state.branches
-        isnothing(b.scope) && continue
-        scope_parents[b.scope] = if isnothing(b.parent)
-            nothing
-        else
-            b.parent.scope
-        end
+        b.scope === :root && continue
+        scope_parents[b.scope] = b.parent.scope
     end
     scope_args = Dict{Symbol, Vector{Int}}()
     for (idx, (_, si)) in enumerate(args)
@@ -303,7 +300,7 @@ end
 
 ## show
 
-function defid_show(segs::Vector{IdValueSegment},
+function defid_show(segs::Vector{ValueSegment},
                     properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
                     state::DefIdState, name::Symbol)
     resolved = resolve_property_segments(properties, segs)
@@ -340,7 +337,7 @@ end
 
 ## segments
 
-function defid_segments_type(segs::Vector{IdValueSegment}, name::Symbol)
+function defid_segments_type(segs::Vector{ValueSegment}, name::Symbol)
     isempty(segs) && return :()
     :(function $(GlobalRef(FastIdentifiers, :segments))(::Type{$(esc(name))})
           $(Expr(:tuple, [(; nbits=s.nbits, kind=s.kind, label=s.label, desc=s.desc, shortform=s.shortform)
@@ -348,7 +345,7 @@ function defid_segments_type(segs::Vector{IdValueSegment}, name::Symbol)
       end)
 end
 
-function defid_segments_value(segs::Vector{IdValueSegment}, pexprs::Vector{ExprVarLine}, name::Symbol)
+function defid_segments_value(segs::Vector{ValueSegment}, pexprs::Vector{ExprVarLine}, name::Symbol)
     isempty(segs) && return :()
     svars = Tuple{Int, Symbol}[]
     pexprs2 = map(copy, pexprs)
@@ -366,7 +363,7 @@ end
 # Replace `__segment_printed = i` markers with `segN = takestring!(io)`,
 # building up the (segment_index, varname) list as we go.
 function rewrite_segment_captures!(segvars::Vector{Tuple{Int, Symbol}},
-                                   segs::Vector{IdValueSegment},
+                                   segs::Vector{ValueSegment},
                                    expr::ExprVarLine)
     expr isa Expr || return expr
     if Meta.isexpr(expr, :(=)) && first(expr.args) === :__segment_printed
@@ -392,7 +389,7 @@ end
 
 # Map properties to `(name, segment_indices)` pairs, resolving Symbol refs
 # to the corresponding segment index.
-function resolve_property_segments(properties, segs::Vector{IdValueSegment})
+function resolve_property_segments(properties, segs::Vector{ValueSegment})
     result = Pair{Symbol, Vector{Int}}[]
     for (pname, val) in properties
         if val isa Symbol

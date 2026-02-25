@@ -7,13 +7,36 @@ using FastIdentifiers: FastIdentifiers, AbstractIdentifier, MalformedIdentifier,
     ChecksumViolation, shortcode, purlprefix, segments, nbits, parsebytes, tobytes,
     parsebounds, printbounds, idchecksum, idcode
 
-include("../packed/PackedParsers.jl")
-using .PackedParsers: SentinelSpec, SegmentBounds, SegmentCodegen, SegmentMeta,
-    SegmentOutput, SegmentDef, segment_set, segment_kwargs, all_kwargs
+include("../packed/PackedParselets.jl")
+using .PackedParselets: SentinelSpec, SegmentBounds, SegmentCodegen, SegmentMeta,
+    SegmentOutput, SegmentDef, segment_set, segment_kwargs, all_kwargs,
+    # Core types
+    ExprVarLine, NodeCtx, OptSentinel,
+    ValueSegment, PatternExprs,
+    ParseBranch, ParserState,
+    # Bit-sizing
+    cardbits, cardtype,
+    # State mutation
+    inc_parsed!, inc_print!, register_errmsg,
+    # Segment helpers
+    value_segment_output, emit_print_detect!, opt_fail_expr,
+    unclaimed_sentinel, claim_sentinel!, process_segment_output!,
+    segments_formstring,
+    # Bit packing
+    zero_int, zero_parsed_expr, emit_pack, emit_extract,
+    # Loaders
+    REGISTER_TYPES, register_type, register_chunks, backward_verify_chunk,
+    pack_bytes, pack_chunk, gen_load, gen_masked_compare,
+    # Runtime utilities
+    parsechars, parseint, byte2int, fastparse,
+    printchars, chars2string,
+    bufprint, bufprintchars
 
-include("utils.jl")
+@static if VERSION < v"1.13-"
+    using .PackedParselets: takestring!
+end
+
 include("core.jl")
-include("loaders.jl")
 include("swar.jl")
 include("stringly.jl")
 include("choices.jl")
@@ -33,10 +56,13 @@ Returns a `:toplevel` expression block ready for `eval`.
 """
 function deftype(segments::NamedTuple, mod::Module, name::Symbol, pattern;
                  casefold::Bool = true, purlprefix::Union{Nothing, String} = nothing)
-    root = ParseBranch(1, nothing, nothing, 0, 0, 0, 0, 0)
-    state = DefIdState(name, mod, 0, casefold, purlprefix, ParseBranch[root], String[], Pair{Symbol, SegmentOutput}[])
+    root = ParseBranch(1, nothing, :root, 0, 0, 0, 0, 0, 0)
+    globals = if isnothing(purlprefix); (;) else (; purlprefix) end
+    state = ParserState(name, mod, 0, AbstractIdentifier, FastIdentifiers,
+                        globals, ParseBranch[root], String[], Pair{Symbol, SegmentOutput}[])
     nctx = NodeCtx(:current_branch, root)
-    exprs = IdExprs(([], [], [], []))
+    nctx = NodeCtx(nctx, :casefold, casefold)
+    exprs = PatternExprs(([], [], [], []))
     if !isnothing(purlprefix)
         defid_dispatch!(exprs, state, nctx, segments, Expr(:call, :skip, lowercase(purlprefix)))
     end

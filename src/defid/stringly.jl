@@ -15,12 +15,12 @@ function compile_literal(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::V
     option = get(nctx, :optional, nothing)
     opt_label = get(nctx, :opt_label, nothing)
     notfound = if isnothing(option)
-        errsym = defid_errmsg(state, "Expected literal '$(lit)'")
+        errsym = register_errmsg(state, "Expected literal '$(lit)'")
         :(return ($errsym, pos))
     else
         opt_fail_expr(option, opt_label)
     end
-    casefold = get(nctx, :casefold, state.casefold) === true
+    casefold = get(nctx, :casefold, false) === true
     casefold && !all(isascii, lit) &&
         throw(ArgumentError("Expected ASCII string for literal with casefolding"))
     litref = if casefold; lowercase(lit) else lit end
@@ -45,7 +45,7 @@ function compile_skip(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Vect
     pval = get(nctx, :print, nothing)
     sargs = Vector{String}(args)
     !isnothing(pval) && pval ∉ sargs && push!(sargs, pval)
-    casefold = get(nctx, :casefold, state.casefold) === true
+    casefold = get(nctx, :casefold, false) === true
     casefold && !all(isascii, sargs) &&
         throw(ArgumentError("Expected all arguments to be ASCII strings for skip with casefolding"))
     parse = ExprVarLine[gen_static_lchop(if casefold; map(lowercase, sargs) else sargs end, casefold=casefold)]

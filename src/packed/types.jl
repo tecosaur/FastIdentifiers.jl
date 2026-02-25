@@ -1,4 +1,4 @@
-# Core types for the PackedParsers compilation pipeline.
+# Core types for the PackedParselets compilation pipeline.
 #
 # SegmentOutput is the structured return type for segment handlers.
 # SegmentDef describes a registered segment kind. Both are part of

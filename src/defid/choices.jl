@@ -29,7 +29,7 @@ function choice_setup(state::DefIdState, nctx::NodeCtx, options::Vector{Any})
     soptions = Vector{String}(options)
     allowempty = any(isempty, soptions)
     allowempty && filter!(!isempty, soptions)
-    casefold = get(nctx, :casefold, state.casefold)
+    casefold = get(nctx, :casefold, false)
     target = get(nctx, :is, nothing)::Union{Nothing, String}
     fieldvar = get(nctx, :fieldvar, gensym("prefix"))
     option = get(nctx, :optional, nothing)
@@ -57,7 +57,7 @@ function choice_setup(state::DefIdState, nctx::NodeCtx, options::Vector{Any})
     # Build the length-guarded match wrapper
     opt_label = get(nctx, :opt_label, nothing)
     notfound = if isnothing(option)
-        errsym = defid_errmsg(state, "Expected one of $(join(soptions, ", "))")
+        errsym = register_errmsg(state, "Expected one of $(join(soptions, ", "))")
         :(return ($errsym, pos))
     else
         opt_fail_expr(option, opt_label)
@@ -89,8 +89,8 @@ function compile_choice_value(state::DefIdState, nctx::NodeCtx, ctx)
     parse_exprs = ExprVarLine[
           :($fieldvar = zero($choiceint)),
           checkedmatch,
-          defid_emit_pack(state, choiceint, fieldvar, nbits_pos)]
-    fextract = :($fieldvar = $(defid_emit_extract(state, nbits_pos, choicebits)))
+          emit_pack(state, choiceint, fieldvar, nbits_pos)]
+    fextract = :($fieldvar = $(emit_extract(state, nbits_pos, choicebits)))
     symoptions = Tuple(Symbol.(soptions))
     present = :(!iszero($fieldvar))
     printexpr = :(print(io, @inbounds $(Tuple(soptions))[$fieldvar]))
@@ -107,7 +107,7 @@ function compile_choice_value(state::DefIdState, nctx::NodeCtx, ctx)
                   string("Invalid option :", $argvar, "; expected one of: ", $(join(soptions, ", ")))))
               idx % $choiceint
           end),
-        defid_emit_pack(state, choiceint, fieldvar, nbits_pos)]
+        emit_pack(state, choiceint, fieldvar, nbits_pos)]
     extract_value = :(@inbounds $(symoptions)[$fieldvar])
     # For allowempty without an enclosing optional, wrap extract in a presence guard
     eopt = if allowempty && isnothing(option)

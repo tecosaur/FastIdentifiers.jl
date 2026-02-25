@@ -45,9 +45,9 @@ function compile_digits(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Ve
     (; parsevar, directvar) = parsed
     posadv = ifelse(fixedwidth, maxdigits, bitsconsumed)
     parse_exprs = ExprVarLine[parsed.exprs...,
-        defid_emit_pack(state, dT, parsevar, nbits_pos), :(pos += $posadv)]
+        emit_pack(state, dT, parsevar, nbits_pos), :(pos += $posadv)]
     # Extract and print
-    fextract = :($fnum = $(defid_emit_extract(state, nbits_pos, dbits)))
+    fextract = :($fnum = $(emit_extract(state, nbits_pos, dbits)))
     fcast = if dI == dT; fnum else :($fnum % $dI) end
     fvalue = if iszero(min) && claims
         :($fcast - $(one(dI)))
@@ -98,7 +98,7 @@ function compile_digits(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Ve
         string("Value ", $argvar, " is above maximum ", $max)))))
     push!(body, :($fnum = $argvar % $dI))
     directvar || push!(body, encode_expr)
-    push!(body, defid_emit_pack(state, dT, parsevar, nbits_pos))
+    push!(body, emit_pack(state, dT, parsevar, nbits_pos))
     # Metadata
     seg_shortform = let charset = if base <= 10; "0-$(Char('0' + base - 1))"
                                    else "0-9A-$(Char('A' + base - 11))" end
@@ -218,7 +218,7 @@ Non-letter ranges pass through unchanged.
 function resolve_charseq_flags(state::DefIdState, nctx, kind::Symbol, ranges)
     upper = get(nctx, :upper, false)::Bool
     lower = get(nctx, :lower, false)::Bool
-    casefold = get(nctx, :casefold, state.casefold)::Bool
+    casefold = get(nctx, :casefold, false)::Bool
     upper && lower && throw(ArgumentError("Cannot specify both upper=true and lower=true for $kind"))
     if lower
         collapse_letter_ranges(ranges, :lower), casefold
@@ -298,7 +298,7 @@ function compile_charseq_impl(state::DefIdState, nctx::NodeCtx,
     parse_exprs = ExprVarLine[]
     push!(parse_exprs,
           :(($lenvar, $charvar) = parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed)))
-    errmsg = defid_errmsg(state, if variable
+    errmsg = register_errmsg(state, if variable
         "Expected $minlen to $maxlen $kind characters"
     else
         "Expected $maxlen $kind characters"
@@ -326,7 +326,7 @@ function compile_charseq_impl(state::DefIdState, nctx::NodeCtx,
         minlen
     end
     push!(parse_exprs,
-          defid_emit_pack(state, cT, charvar, nbits_pos - lenbits),
+          emit_pack(state, cT, charvar, nbits_pos - lenbits),
           :(pos += $lenvar))
     if variable
         lenpack = if lenbase == 0
@@ -335,16 +335,16 @@ function compile_charseq_impl(state::DefIdState, nctx::NodeCtx,
             :($lenoffset = ($lenvar - $lenbase) % $lT)
         end
         push!(parse_exprs, lenpack,
-              defid_emit_pack(state, lT, lenoffset, nbits_pos))
+              emit_pack(state, lT, lenoffset, nbits_pos))
     end
     # Print / extract
-    fextract_chars = :($charvar = $(defid_emit_extract(state, nbits_pos - lenbits, charbits)))
+    fextract_chars = :($charvar = $(emit_extract(state, nbits_pos - lenbits, charbits)))
     extracts = ExprVarLine[fextract_chars]
     if variable
         fextract_len = if lenbase == 0
-            :($lenvar = $(defid_emit_extract(state, nbits_pos, lenbits)))
+            :($lenvar = $(emit_extract(state, nbits_pos, lenbits)))
         else
-            :($lenvar = $(defid_emit_extract(state, nbits_pos, lenbits)) + $lenbase)
+            :($lenvar = $(emit_extract(state, nbits_pos, lenbits)) + $lenbase)
         end
         push!(extracts, fextract_len)
     end
@@ -375,7 +375,7 @@ function compile_charseq_impl(state::DefIdState, nctx::NodeCtx,
               :($lenvar != $maxlen && throw(ArgumentError(
                   string("String \"", $argvar, "\" must be exactly ", $maxlen, " characters"))))
           end)
-        $(defid_emit_pack(state, cT, charvar, nbits_pos - lenbits))
+        $(emit_pack(state, cT, charvar, nbits_pos - lenbits))
         $(if variable
               lenpack_expr = if lenbase == 0
                   :($lenoffset = $lenvar % $lT)
@@ -384,7 +384,7 @@ function compile_charseq_impl(state::DefIdState, nctx::NodeCtx,
               end
               quote
                   $lenpack_expr
-                  $(defid_emit_pack(state, lT, lenoffset, nbits_pos))
+                  $(emit_pack(state, lT, lenoffset, nbits_pos))
               end
           else
               nothing
@@ -430,7 +430,7 @@ function compile_embed(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Vec
     # Parse: delegate to inner parsebytes
     eresult = Symbol("$(fieldvar)_result")
     epos = Symbol("$(fieldvar)_epos")
-    errmsg = defid_errmsg(state, "Invalid embedded $(T)")
+    errmsg = register_errmsg(state, "Invalid embedded $(T)")
     opt_label = get(nctx, :opt_label, nothing)
     notfound = if isnothing(option)
         [:(return ($errmsg, pos))]
@@ -438,25 +438,25 @@ function compile_embed(state::DefIdState, nctx::NodeCtx, ::SegmentDef, args::Vec
         [opt_fail_expr(option, opt_label)]
     end
     eshifted = Symbol("$(fieldvar)_shifted")
-    pack = defid_emit_pack(state, T, eshifted, nbits_pos - presbits)
+    pack = emit_pack(state, T, eshifted, nbits_pos - presbits)
     parse_exprs = ExprVarLine[
           :(($eresult, $epos) = parsebytes($T, @view idbytes[pos:end])),
           :(if !($eresult isa $T); $(notfound...) end),
           :($eshifted = $(to_lsb(eresult))),
           pack]
     if claims
-        push!(parse_exprs, defid_emit_pack(state, Bool, true, nbits_pos))
+        push!(parse_exprs, emit_pack(state, Bool, true, nbits_pos))
     end
     push!(parse_exprs, :(pos += $epos - 1))
     # Extract + print
-    fextract = :($fieldvar = $(to_msb(defid_emit_extract(state, nbits_pos - presbits, ebits, T))))
+    fextract = :($fieldvar = $(to_msb(emit_extract(state, nbits_pos - presbits, ebits, T))))
     # Constructor impart
     argvar = gensym("arg_embed")
     argshifted = gensym("arg_embed_shifted")
     body = Any[:($argshifted = $(to_lsb(argvar))),
-               defid_emit_pack(state, T, argshifted, nbits_pos - presbits)]
+               emit_pack(state, T, argshifted, nbits_pos - presbits)]
     if presbits > 0
-        push!(body, defid_emit_pack(state, Bool, true, nbits_pos))
+        push!(body, emit_pack(state, Bool, true, nbits_pos))
     end
     sentinel = if claims; SentinelSpec((0, presbits)) else nothing end
     value_segment_output(;

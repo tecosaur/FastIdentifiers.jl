@@ -9,7 +9,7 @@
 
 ## Checkdigit handler
 
-function compile_checkdigit(exprs::IdExprs,
+function compile_checkdigit(exprs::PatternExprs,
                             state::DefIdState, nctx::NodeCtx,
                             ::SegmentDef, args::Vector{Any})
     !isnothing(get(nctx, :optional, nothing)) &&
@@ -43,7 +43,7 @@ function compile_checkdigit(exprs::IdExprs,
     checkbyte = gensym("checkbyte")
     checkval = gensym("checkval")
     ok_sym = gensym("checksum_ok")
-    errmsg = defid_errmsg(state, "Invalid check character")
+    errmsg = register_errmsg(state, "Invalid check character")
     lencheck = defid_lengthcheck(state, nctx, 1)
     seg = exprs.segments[seg_idx]
     extract_copy = map(copy, seg.extract)
@@ -79,7 +79,7 @@ Post-assembly finalize hook for the checkdigit segment.
 Generates `idchecksum` and `idcode` methods, and patches `parse`/`tryparse`
 to handle checksum violations (negative pos from `__checksum_gate`).
 """
-function finalize_checkdigit!(block::Expr, exprs::IdExprs,
+function finalize_checkdigit!(block::Expr, exprs::PatternExprs,
                               state::DefIdState, name::Symbol)
     idx = findfirst(p -> first(p) === :checkdigit, state.segment_outputs)
     isnothing(idx) && return

@@ -31,7 +31,13 @@ end
 
 function resolve_branch_check(b::ParseBranch)
     local_min = b.parsed_min - b.start_min
-    if local_min <= 0 || (!isnothing(b.parent) && b.parent.parsed_min >= b.parsed_min)
+    local_min <= 0 && return true
+    parent_remaining = if isnothing(b.parent)
+        0
+    else
+        b.parent.parsed_min - b.start_max
+    end
+    if parent_remaining >= local_min
         true
     else
         :(nbytes - pos + 1 >= $local_min)
@@ -85,7 +91,7 @@ This is an optimisation pass: at each segment boundary where the remaining
 byte guarantee is insufficient, it inserts a check for the maximum useful
 amount, pushing the next mandatory check as far forward as possible.
 
-When `state` is provided, error messages are registered via `defid_errmsg`
+When `state` is provided, error messages are registered via `register_errmsg`
 for proper error reporting. Without `state`, descriptions are used directly
 (for validation/comparison purposes only).
 """
@@ -167,7 +173,7 @@ function insert_length_checks!(pexprs::Vector{ExprVarLine}, branches::Vector{Par
                 G = Base.max(G, seg_entry_need)
                 fail = if isnothing(seg.option)
                     erridx = if !isnothing(state)
-                        defid_errmsg(state, seg.desc)
+                        register_errmsg(state, seg.desc)
                     else
                         seg.desc
                     end

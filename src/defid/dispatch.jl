@@ -25,7 +25,7 @@ const GLOBAL_KWARGS = (:purlprefix,)
 
 ## Pattern dispatch
 
-function defid_dispatch!(exprs::IdExprs,
+function defid_dispatch!(exprs::PatternExprs,
                          state::DefIdState, nctx::NodeCtx,
                          segments::NamedTuple,
                          node::Any, args::Vector{Any})
@@ -57,7 +57,7 @@ function defid_dispatch!(exprs::IdExprs,
     end
 end
 
-function defid_dispatch!(exprs::IdExprs,
+function defid_dispatch!(exprs::PatternExprs,
                          state::DefIdState, nctx::NodeCtx,
                          segments::NamedTuple,
                          thing::Any)
@@ -108,7 +108,7 @@ end
 
 ## Field capture
 
-function defid_field!(exprs::IdExprs,
+function defid_field!(exprs::PatternExprs,
                       state::DefIdState, nctx::NodeCtx,
                       segments::NamedTuple,
                       node::QuoteNode,
@@ -139,7 +139,7 @@ end
 
 ## Optional branching
 
-function defid_optional!(exprs::IdExprs,
+function defid_optional!(exprs::PatternExprs,
                          state::DefIdState, nctx::NodeCtx,
                          segments::NamedTuple,
                          args::Vector{Any})
@@ -152,7 +152,8 @@ function defid_optional!(exprs::IdExprs,
     # Fork a child branch for this optional scope
     parent = nctx[:current_branch]
     child = ParseBranch(length(state.branches) + 1, parent, optvar,
-                        parent.parsed_min, parent.parsed_min, parent.parsed_min,
+                        parent.parsed_min, parent.parsed_max,
+                        parent.parsed_min, parent.parsed_min,
                         parent.print_min, parent.print_max)
     push!(state.branches, child)
     nctx = NodeCtx(nctx, :current_branch, child)
@@ -173,12 +174,12 @@ function defid_optional!(exprs::IdExprs,
     seg_end = length(exprs.segments)
     if sentinel_ref[] === nothing
         flag_nbits = (state.bits += 1)
-        push!(oexprs.parse, defid_emit_pack(state, Bool, optvar, flag_nbits))
+        push!(oexprs.parse, emit_pack(state, Bool, optvar, flag_nbits))
         sentinel_ref[] = OptSentinel((flag_nbits, 1))
     end
     # Patch segment extract conditions with the resolved sentinel check
     sentinel = sentinel_ref[]
-    check = :(!iszero($(defid_emit_extract(state, sentinel.position, sentinel.nbits))))
+    check = :(!iszero($(emit_extract(state, sentinel.position, sentinel.nbits))))
     for i in seg_start+1:seg_end
         extract = exprs.segments[i].extract
         isempty(extract) && continue
