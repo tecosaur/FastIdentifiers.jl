@@ -12,19 +12,19 @@
 Handle a `choice(...)` pattern node.
 
 Validates options, builds a matcher (via perfect hashing or linear scan),
-then delegates to `choice_value!` (value-carrying, allocates bits) or
-`choice_fixed!` (fixed target via `is=`, no bits allocated).
+then delegates to `compile_choice_value` or `compile_choice_fixed`.
 """
 function defid_choice!(exprs::IdExprs,
                        state::DefIdState, nctx::NodeCtx,
                        options::Vector{Any})
     all(o -> o isa String, options) || throw(ArgumentError("Expected all options to be strings for choice"))
     ctx = choice_setup(state, nctx, options)
-    if isnothing(ctx.target)
-        choice_value!(exprs, state, nctx, ctx)
+    output = if isnothing(ctx.target)
+        compile_choice_value(state, nctx, ctx)
     else
-        choice_fixed!(exprs, state, nctx, ctx)
+        compile_choice_fixed(state, nctx, ctx)
     end
+    process_segment_output!(exprs, state, nctx, :choice, output)
 end
 
 function choice_setup(state::DefIdState, nctx::NodeCtx, options::Vector{Any})
@@ -83,28 +83,25 @@ function choice_setup(state::DefIdState, nctx::NodeCtx, options::Vector{Any})
        checkedmatch, matcher, target, claims)
 end
 
-function choice_value!(exprs::IdExprs, state::DefIdState, nctx::NodeCtx, ctx)
+function compile_choice_value(state::DefIdState, nctx::NodeCtx, ctx)
     (; soptions, fieldvar, option, allowempty, choicebits, choiceint, checkedmatch, claims) = ctx
-    nbits = (state.bits += choicebits)
-    claims && claim_sentinel!(nctx, nbits, choicebits)
+    # Compute bit position without mutating state.bits
+    nbits_pos = state.bits + choicebits
     pmin = if allowempty; 0 else minimum(ncodeunits, soptions) end
-    inc_print!(nctx, pmin, maximum(ncodeunits, soptions))
-    inc_parsed!(nctx, pmin, maximum(ncodeunits, soptions))
-    push!(exprs.parse,
+    parse_exprs = ExprVarLine[
           :($fieldvar = zero($choiceint)),
           checkedmatch,
-          defid_emit_pack(state, choiceint, fieldvar, nbits))
-    fextract = :($fieldvar = $(defid_emit_extract(state, nbits, choicebits)))
+          defid_emit_pack(state, choiceint, fieldvar, nbits_pos)]
+    fextract = :($fieldvar = $(defid_emit_extract(state, nbits_pos, choicebits)))
     symoptions = Tuple(Symbol.(soptions))
     present = :(!iszero($fieldvar))
-    emit_print_detect!(exprs, nctx, option, ExprVarLine[fextract])
     printexpr = :(print(io, @inbounds $(Tuple(soptions))[$fieldvar]))
     # When allowempty without an enclosing optional, guard print on presence
-    push!(exprs.print, if allowempty && isnothing(option)
+    print_exprs = ExprVarLine[if allowempty && isnothing(option)
               :(if $present; $printexpr end)
           else
               printexpr
-          end)
+          end]
     argvar = gensym("arg_choice")
     impart_core = Any[
         :($fieldvar = let idx = findfirst(==(Symbol($argvar)), $symoptions)
@@ -112,7 +109,7 @@ function choice_value!(exprs::IdExprs, state::DefIdState, nctx::NodeCtx, ctx)
                   string("Invalid option :", $argvar, "; expected one of: ", $(join(soptions, ", ")))))
               idx % $choiceint
           end),
-        defid_emit_pack(state, choiceint, fieldvar, nbits)]
+        defid_emit_pack(state, choiceint, fieldvar, nbits_pos)]
     extract_value = :(@inbounds $(symoptions)[$fieldvar])
     # For allowempty without an enclosing optional, wrap extract in a presence guard
     eopt = if allowempty && isnothing(option)
@@ -121,33 +118,35 @@ function choice_value!(exprs::IdExprs, state::DefIdState, nctx::NodeCtx, ctx)
     else
         option
     end
-    push_value_segment!(exprs;
-        nbits=choicebits, kind=:choice, fieldvar, desc=join(soptions, " | "),
+    sentinel = if claims; SentinelSpec((0, choicebits)) else nothing end
+    value_segment_output(;
+        nbits=choicebits, fieldvar, desc=join(soptions, " | "),
         shortform=join(soptions, " | "),
         argvar, base_argtype=:Symbol, option=eopt,
-        extract_setup=ExprVarLine[fextract],
-        extract_value, present_check=true,
-        impart_body=impart_core)
+        sentinel, parsed=pmin:maximum(ncodeunits, soptions),
+        printed=pmin:maximum(ncodeunits, soptions),
+        parse=parse_exprs,
+        extract_setup=ExprVarLine[fextract], extract_value,
+        impart_body=impart_core, print=print_exprs)
 end
 
-function choice_fixed!(exprs::IdExprs, state::DefIdState, nctx::NodeCtx, ctx)
+function compile_choice_fixed(state::DefIdState, nctx::NodeCtx, ctx)
     (; soptions, fieldvar, option, allowempty, choiceint, checkedmatch, matcher, target) = ctx
-    if any(isempty, soptions)
-        push!(exprs.parse, matcher)
+    parse_exprs = if any(isempty, soptions)
+        ExprVarLine[matcher]
     else
-        push!(exprs.parse,
-              :($fieldvar = zero($choiceint)),
-              checkedmatch)
+        ExprVarLine[:($fieldvar = zero($choiceint)), checkedmatch]
     end
-    inc_print!(nctx, ncodeunits(target), ncodeunits(target))
     pmin = if allowempty; 0 else minimum(ncodeunits, soptions) end
-    inc_parsed!(nctx, pmin, maximum(ncodeunits, soptions))
-    push!(exprs.segments, IdValueSegment((0, :choice,
-          Symbol(chopprefix(String(fieldvar), "attr_")),
-          "Choice of literal string \"$(target)\" vs $(join(soptions, ", "))",
-          join(soptions, " | "),
-          nothing, :_, ExprVarLine[], Any[], option)))
-    push!(exprs.print, :(print(io, $target)), :(__segment_printed = $(length(exprs.segments))))
+    tlen = ncodeunits(target)
+    label = Symbol(chopprefix(String(fieldvar), "attr_"))
+    SegmentOutput(
+        SegmentBounds(pmin:maximum(ncodeunits, soptions), tlen:tlen, 0, nothing),
+        SegmentCodegen(parse_exprs, ExprVarLine[], ExprVarLine[], Any[],
+                       ExprVarLine[:(print(io, $target))]),
+        SegmentMeta(label,
+                    "Choice of literal string \"$(target)\" vs $(join(soptions, ", "))",
+                    join(soptions, " | "), nothing, nothing))
 end
 
 ## Matcher assembly

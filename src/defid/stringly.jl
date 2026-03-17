@@ -3,14 +3,15 @@
 
 # String-oriented pattern handlers and their codegen helpers.
 #
-# Pattern handlers: defid_literal! (required literal), defid_skip! (prefix stripping)
+# Compile handlers: compile_literal (required literal), compile_skip (prefix stripping)
 # Codegen helpers: gen_literal_mismatch, gen_static_lchop, gen_string_match
 
-## Literal
+## SegmentOutput-returning handlers
 
-function defid_literal!(exprs::IdExprs,
-                        state::DefIdState, nctx::NodeCtx,
-                        lit::String)
+function compile_literal(state::DefIdState, nctx::NodeCtx, args::Vector{Any})
+    length(args) == 1 || throw(ArgumentError("Expected exactly one argument for literal, got $(length(args))"))
+    lit = args[1]
+    lit isa String || throw(ArgumentError("Expected a string literal for literal, got $lit"))
     option = get(nctx, :optional, nothing)
     opt_label = get(nctx, :opt_label, nothing)
     notfound = if isnothing(option)
@@ -20,49 +21,48 @@ function defid_literal!(exprs::IdExprs,
         opt_fail_expr(option, opt_label)
     end
     casefold = get(nctx, :casefold, state.casefold) === true
-    if casefold
-        all(isascii, lit) || throw(ArgumentError("Expected ASCII string for literal with casefolding"))
-    end
+    casefold && !all(isascii, lit) &&
+        throw(ArgumentError("Expected ASCII string for literal with casefolding"))
     litref = if casefold; lowercase(lit) else lit end
     litlen = ncodeunits(litref)
     mismatch = gen_literal_mismatch(litref, casefold, state, nctx)
     lencheck = defid_lengthcheck(state, nctx, litlen)
-    push!(exprs.parse,
-          :(if !$lencheck
-                $notfound
-            elseif $mismatch
-                $notfound
-            end),
-          :(pos += $litlen))
-    push!(exprs.segments, IdValueSegment((0, :literal, :literal,
-          sprint(show, lit), lit, nothing, :_, ExprVarLine[], Any[], option)))
-    push!(exprs.print, :(print(io, $lit)), :(__segment_printed = $(length(exprs.segments))))
-    inc_print!(nctx, litlen, litlen)
-    inc_parsed!(nctx, litlen, litlen)
+    parse = ExprVarLine[
+        :(if !$lencheck
+              $notfound
+          elseif $mismatch
+              $notfound
+          end),
+        :(pos += $litlen)]
+    SegmentOutput(
+        SegmentBounds(litlen:litlen, litlen:litlen, 0, nothing),
+        SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Any[], ExprVarLine[:(print(io, $lit))]),
+        SegmentMeta(:literal, sprint(show, lit), lit, nothing, nothing))
 end
 
-## Skip
-
-function defid_skip!(exprs::IdExprs,
-                     state::DefIdState, nctx::NodeCtx,
-                     args::Vector{Any})
+function compile_skip(state::DefIdState, nctx::NodeCtx, args::Vector{Any})
     all(a -> a isa String, args) || throw(ArgumentError("Expected all arguments to be strings for skip"))
     pval = get(nctx, :print, nothing)
     sargs = Vector{String}(args)
     !isnothing(pval) && pval ∉ sargs && push!(sargs, pval)
     casefold = get(nctx, :casefold, state.casefold) === true
-    if casefold
-        all(isascii, sargs) || throw(ArgumentError("Expected all arguments to be ASCII strings for skip with casefolding"))
-    end
-    push!(exprs.parse, gen_static_lchop(if casefold; map(lowercase, sargs) else sargs end, casefold=casefold))
-    inc_parsed!(nctx, 0, maximum(ncodeunits, sargs))
+    casefold && !all(isascii, sargs) &&
+        throw(ArgumentError("Expected all arguments to be ASCII strings for skip with casefolding"))
+    parse = ExprVarLine[gen_static_lchop(if casefold; map(lowercase, sargs) else sargs end, casefold=casefold)]
+    parsed_max = maximum(ncodeunits, sargs)
     if !isnothing(pval)
-        push!(exprs.segments, IdValueSegment((0, :skip, :skip,
-              "Skipped literal string \"$(join(sargs, ", "))\"",
-              pval,
-              nothing, :_, ExprVarLine[], Any[], get(nctx, :optional, nothing))))
-        push!(exprs.print, :(print(io, $pval)), :(__segment_printed = $(length(exprs.segments))))
-        inc_print!(nctx, ncodeunits(pval), ncodeunits(pval))
+        plen = ncodeunits(pval)
+        SegmentOutput(
+            SegmentBounds(0:parsed_max, plen:plen, 0, nothing),
+            SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Any[], ExprVarLine[:(print(io, $pval))]),
+            SegmentMeta(:skip, "Skipped literal string \"$(join(sargs, ", "))\"", pval, nothing, nothing))
+    else
+        # Skip without print: still needs parse codegen and byte bounds,
+        # but no segment registration or print output
+        SegmentOutput(
+            SegmentBounds(0:parsed_max, 0:0, 0, nothing),
+            SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Any[], ExprVarLine[]),
+            SegmentMeta(:skip, "", "", nothing, nothing))
     end
 end
 

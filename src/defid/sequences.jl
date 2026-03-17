@@ -2,14 +2,12 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # Pattern handlers for value-carrying sequences: digits, character sequences
-# (letters, alphnum, hex, charset), and embedded identifier types. These emit
-# parse/print expressions, bit-packing, and constructor impart code.
+# (letters, alphnum, hex, charset), and embedded identifier types. These
+# return SegmentOutput and let process_segment_output! handle framework mutations.
 
 ## Digits
 
-function defid_digits!(exprs::IdExprs,
-                       state::DefIdState, nctx::NodeCtx,
-                       args::Vector{Any})
+function compile_digits(state::DefIdState, nctx::NodeCtx, args::Vector{Any})
     length(args) ∈ (0, 1) || throw(ArgumentError("Expected at most one positional argument for digits, got $(length(args))"))
     base = get(nctx, :base, 10)::Int
     min = get(nctx, :min, 0)::Int
@@ -34,24 +32,22 @@ function defid_digits!(exprs::IdExprs,
     dI = cardtype(cardbits(max + 1))
     dT = cardtype(dbits)
     fieldvar = get(nctx, :fieldvar, gensym("digits"))
-    nbits = (state.bits += dbits)
-    claims && claim_sentinel!(nctx, nbits, dbits)
+    # Compute bit position without mutating state.bits
+    nbits_pos = state.bits + dbits
     fixedpad = ifelse(fixedwidth, maxdigits, 0)
     printmin = Base.max(ndigits(Base.max(min, 1); base), pad, fixedpad)
     printmax = Base.max(ndigits(max; base), pad, fixedpad)
-    # gen_digit_parse reads parsed_min for SWAR safety, so call before updating
+    # gen_digit_parse reads parsed_min for SWAR safety, so call before process_segment_output! updates bounds
     dspec = (; base, mindigits, maxdigits, min, max, pad, dI, dT, claims_sentinel=claims)
     parsed = gen_digit_parse(state, nctx, fieldvar, option, dspec)
-    inc_print!(nctx, printmin, printmax)
-    inc_parsed!(nctx, mindigits, maxdigits)
     fnum = Symbol("$(fieldvar)_num")
     bitsconsumed = Symbol("$(fieldvar)_bitsconsumed")
     (; parsevar, directvar) = parsed
-    append!(exprs.parse, parsed.exprs)
     posadv = ifelse(fixedwidth, maxdigits, bitsconsumed)
-    push!(exprs.parse, defid_emit_pack(state, dT, parsevar, nbits), :(pos += $posadv))
+    parse_exprs = ExprVarLine[parsed.exprs...,
+        defid_emit_pack(state, dT, parsevar, nbits_pos), :(pos += $posadv)]
     # Extract and print
-    fextract = :($fnum = $(defid_emit_extract(state, nbits, dbits)))
+    fextract = :($fnum = $(defid_emit_extract(state, nbits_pos, dbits)))
     fcast = if dI == dT; fnum else :($fnum % $dI) end
     fvalue = if iszero(min) && claims
         :($fcast - $(one(dI)))
@@ -71,19 +67,9 @@ function defid_digits!(exprs::IdExprs,
     else
         :(print(io, string($printvar, base=$base)))
     end
-    seg_desc = string(if fixedwidth; "$maxdigits" else "$mindigits-$maxdigits" end,
-                      if isone(maxdigits); " digit" else " digits" end,
-                      base != 10 ? " in base $base" : "",
-                      if min > 0 && max < base^maxdigits - 1
-                          " between $(string(min; base, pad)) and $(string(max; base, pad))"
-                      elseif min > 0
-                          ", at least $(string(min; base, pad))"
-                      elseif max < base^maxdigits - 1
-                          ", at most $(string(max; base, pad))"
-                      else "" end)
-    emit_print_detect!(exprs, nctx, option, ExprVarLine[fextract])
-    directvar || push!(exprs.print, :($fieldvar = $fvalue))
-    push!(exprs.print, printex)
+    print_exprs = ExprVarLine[]
+    directvar || push!(print_exprs, :($fieldvar = $fvalue))
+    push!(print_exprs, printex)
     # Property extract value
     propvalue = if max < typemax(dI) ÷ 2
         sI = signed(dI)
@@ -112,18 +98,31 @@ function defid_digits!(exprs::IdExprs,
         string("Value ", $argvar, " is above maximum ", $max)))))
     push!(body, :($fnum = $argvar % $dI))
     directvar || push!(body, encode_expr)
-    push!(body, defid_emit_pack(state, dT, parsevar, nbits))
+    push!(body, defid_emit_pack(state, dT, parsevar, nbits_pos))
+    # Metadata
     seg_shortform = let charset = if base <= 10; "0-$(Char('0' + base - 1))"
                                    else "0-9A-$(Char('A' + base - 11))" end
         count = if fixedwidth; "$maxdigits" else "$mindigits:$maxdigits" end
         "$charset \u00d7 $count"
     end
-    push_value_segment!(exprs;
-        nbits=dbits, kind=:digits, fieldvar, desc=seg_desc,
-        shortform=seg_shortform,
+    seg_desc = string(if fixedwidth; "$maxdigits" else "$mindigits-$maxdigits" end,
+                      if isone(maxdigits); " digit" else " digits" end,
+                      base != 10 ? " in base $base" : "",
+                      if min > 0 && max < base^maxdigits - 1
+                          " between $(string(min; base, pad)) and $(string(max; base, pad))"
+                      elseif min > 0
+                          ", at least $(string(min; base, pad))"
+                      elseif max < base^maxdigits - 1
+                          ", at most $(string(max; base, pad))"
+                      else "" end)
+    sentinel = if claims; SentinelSpec((0, dbits)) else nothing end
+    value_segment_output(;
+        nbits=dbits, fieldvar, desc=seg_desc, shortform=seg_shortform,
         argvar, base_argtype=:Integer, option,
+        sentinel, parsed=mindigits:maxdigits, printed=printmin:printmax,
+        parse=parse_exprs,
         extract_setup=ExprVarLine[fextract], extract_value=propvalue,
-        present_check=true, impart_body=body)
+        impart_body=body, print=print_exprs)
 end
 
 function parse_digit_range(args, max, base)
@@ -166,7 +165,8 @@ function defid_charseq!(exprs::IdExprs, state::DefIdState, nctx::NodeCtx,
     minlen, maxlen = parse_charseq_length(first(args), kind)
     base_ranges = named ? NAMED_CHARSETS[kind] : parse_charset_ranges(args)
     ranges, cfold = resolve_charseq_flags(state, nctx, kind, base_ranges)
-    defid_charseq_impl!(exprs, state, nctx, minlen, maxlen, ranges, cfold, kind)
+    output = compile_charseq(state, nctx, minlen, maxlen, ranges, cfold, kind)
+    process_segment_output!(exprs, state, nctx, kind, output)
 end
 
 function parse_charseq_length(arg, kind::Symbol)
@@ -253,11 +253,10 @@ function collapse_letter_ranges(ranges, target::Symbol)
     sort!(out; by=first)
 end
 
-function defid_charseq_impl!(exprs::IdExprs,
-                             state::DefIdState, nctx::NodeCtx,
-                             minlen::Int, maxlen::Int,
-                             ranges::Vector{UnitRange{UInt8}},
-                             cfold::Bool, kind::Symbol)
+function compile_charseq(state::DefIdState, nctx::NodeCtx,
+                         minlen::Int, maxlen::Int,
+                         ranges::Vector{UnitRange{UInt8}},
+                         cfold::Bool, kind::Symbol)
     ranges = Tuple(ranges)  # runtime functions dispatch on NTuple
     variable = minlen != maxlen
     option = get(nctx, :optional, nothing)
@@ -284,15 +283,20 @@ function defid_charseq_impl!(exprs::IdExprs,
     lenvar = Symbol("$(fieldvar)_len")
     cT = cardtype(charbits)
     lT = if variable; cardtype(lenbits) else Nothing end
-    nbits_pos = (state.bits += totalbits)
-    if oneindexed; claim_sentinel!(nctx, nbits_pos - lenbits, charbits)
-    elseif claim_via_length; claim_sentinel!(nctx, nbits_pos, lenbits)
+    # Compute bit position without mutating state.bits
+    nbits_pos = state.bits + totalbits
+    # Sentinel spec for process_segment_output!
+    sentinel = if oneindexed
+        SentinelSpec((-lenbits, charbits))
+    elseif claim_via_length
+        SentinelSpec((0, lenbits))
+    else
+        nothing
     end
     scanlimit = defid_lengthbound(state, nctx, maxlen)
-    inc_print!(nctx, minlen, maxlen)
-    inc_parsed!(nctx, minlen, maxlen)
     # Parse
-    push!(exprs.parse,
+    parse_exprs = ExprVarLine[]
+    push!(parse_exprs,
           :(($lenvar, $charvar) = parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed)))
     errmsg = defid_errmsg(state, if variable
         "Expected $minlen to $maxlen $kind characters"
@@ -306,9 +310,9 @@ function defid_charseq_impl!(exprs::IdExprs,
         [opt_fail_expr(option, opt_label)]
     end
     if !isnothing(option) && variable && minlen == 0
-        push!(exprs.parse, :($lenvar > 0 || $(opt_fail_expr(option, opt_label))))
+        push!(parse_exprs, :($lenvar > 0 || $(opt_fail_expr(option, opt_label))))
     else
-        push!(exprs.parse,
+        push!(parse_exprs,
               :(if $(if variable; :($lenvar < $minlen) else :($lenvar != $maxlen) end)
                     $(notfound...)
                 end))
@@ -321,7 +325,7 @@ function defid_charseq_impl!(exprs::IdExprs,
     else
         minlen
     end
-    push!(exprs.parse,
+    push!(parse_exprs,
           defid_emit_pack(state, cT, charvar, nbits_pos - lenbits),
           :(pos += $lenvar))
     if variable
@@ -330,7 +334,7 @@ function defid_charseq_impl!(exprs::IdExprs,
         else
             :($lenoffset = ($lenvar - $lenbase) % $lT)
         end
-        push!(exprs.parse, lenpack,
+        push!(parse_exprs, lenpack,
               defid_emit_pack(state, lT, lenoffset, nbits_pos))
     end
     # Print / extract
@@ -354,8 +358,6 @@ function defid_charseq_impl!(exprs::IdExprs,
     else
         :(chars2string($charvar, $maxlen, $ranges, $oneindexed))
     end
-    emit_print_detect!(exprs, nctx, option, extracts)
-    push!(exprs.print, printex)
     # Constructor impart
     argvar = gensym("arg_charseq")
     encode_chars = quote
@@ -393,22 +395,22 @@ function defid_charseq_impl!(exprs::IdExprs,
         count = if variable; "$minlen:$maxlen" else "$maxlen" end
         "$charset \u00d7 $count"
     end
-    push_value_segment!(exprs;
-        nbits=totalbits, kind, fieldvar,
+    value_segment_output(;
+        nbits=totalbits, fieldvar,
         desc=string(if variable; "$minlen-$maxlen" else "$maxlen" end,
                     " ", kind, if maxlen > 1; " characters" else " character" end),
         shortform=seg_shortform,
         argvar, base_argtype=:AbstractString, option,
+        sentinel, parsed=minlen:maxlen, printed=minlen:maxlen,
+        parse=parse_exprs,
         extract_setup=extracts, extract_value=tostringex,
-        present_check=true, impart_body=charseq_body)
+        impart_body=charseq_body, print=ExprVarLine[printex])
 end
 
 
 ## Embedded identifier types
 
-function defid_embed!(exprs::IdExprs,
-                      state::DefIdState, nctx::NodeCtx,
-                      args::Vector{Any})
+function compile_embed(state::DefIdState, nctx::NodeCtx, args::Vector{Any})
     length(args) == 1 || throw(ArgumentError("embed takes exactly one argument (the identifier type)"))
     T = Core.eval(state.mod, args[1])
     T isa DataType && T <: AbstractIdentifier && isprimitivetype(T) ||
@@ -419,10 +421,8 @@ function defid_embed!(exprs::IdExprs,
     claims = unclaimed_sentinel(nctx)
     presbits = claims ? 1 : 0
     fieldvar = get(nctx, :fieldvar, gensym("embed"))
-    nbits_pos = (state.bits += ebits + presbits)
-    claims && claim_sentinel!(nctx, nbits_pos, presbits)
-    inc_parsed!(nctx, parsebounds(T)...)
-    inc_print!(nctx, printbounds(T)...)
+    # Compute bit position without mutating state.bits
+    nbits_pos = state.bits + ebits + presbits
     # @defid types pack from the MSB, so embedded values must be shifted
     # right by epad before packing (MSB→LSB) and left after extracting (LSB→MSB)
     to_lsb(val) = :(Core.Intrinsics.lshr_int($val, $epad))
@@ -439,19 +439,17 @@ function defid_embed!(exprs::IdExprs,
     end
     eshifted = Symbol("$(fieldvar)_shifted")
     pack = defid_emit_pack(state, T, eshifted, nbits_pos - presbits)
-    push!(exprs.parse,
+    parse_exprs = ExprVarLine[
           :(($eresult, $epos) = parsebytes($T, @view idbytes[pos:end])),
           :(if !($eresult isa $T); $(notfound...) end),
           :($eshifted = $(to_lsb(eresult))),
-          pack)
+          pack]
     if claims
-        push!(exprs.parse, defid_emit_pack(state, Bool, true, nbits_pos))
+        push!(parse_exprs, defid_emit_pack(state, Bool, true, nbits_pos))
     end
-    push!(exprs.parse, :(pos += $epos - 1))
+    push!(parse_exprs, :(pos += $epos - 1))
     # Extract + print
     fextract = :($fieldvar = $(to_msb(defid_emit_extract(state, nbits_pos - presbits, ebits, T))))
-    emit_print_detect!(exprs, nctx, option, ExprVarLine[fextract])
-    push!(exprs.print, :(shortcode(io, $fieldvar)))
     # Constructor impart
     argvar = gensym("arg_embed")
     argshifted = gensym("arg_embed_shifted")
@@ -460,10 +458,13 @@ function defid_embed!(exprs::IdExprs,
     if presbits > 0
         push!(body, defid_emit_pack(state, Bool, true, nbits_pos))
     end
-    push_value_segment!(exprs;
-        nbits=ebits + presbits, kind=:embed, fieldvar,
+    sentinel = if claims; SentinelSpec((0, presbits)) else nothing end
+    value_segment_output(;
+        nbits=ebits + presbits, fieldvar,
         desc="embedded $(T)", shortform=string(T),
         argvar, base_argtype=T, option,
+        sentinel, parsed=parsebounds(T)[1]:parsebounds(T)[2], printed=printbounds(T)[1]:printbounds(T)[2],
+        parse=parse_exprs,
         extract_setup=ExprVarLine[fextract], extract_value=fieldvar,
-        present_check=true, impart_body=body)
+        impart_body=body, print=ExprVarLine[:(shortcode(io, $fieldvar))])
 end

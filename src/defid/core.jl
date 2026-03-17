@@ -78,6 +78,7 @@ mutable struct DefIdState
     const branches::Vector{ParseBranch}
     const errconsts::Vector{String}
     checksum::Union{Nothing, ChecksumInfo}
+    const segment_outputs::Vector{Pair{Symbol, SegmentOutput}}
 end
 
 ## Constants
@@ -152,25 +153,25 @@ end
 ## Segment and property assembly
 
 """
-    push_value_segment!(exprs::IdExprs; nbits, kind, fieldvar, desc, shortform,
-                        argvar, base_argtype, option,
-                        extract_setup, extract_value,
-                        present_check, impart_body)
+    value_segment_output(; nbits, fieldvar, desc, shortform,
+                          argvar, base_argtype, option,
+                          sentinel, parsed, printed,
+                          parse, extract_setup, extract_value,
+                          present_check, impart_body, print)
 
-Push a value-carrying segment with the standard required/optional split.
-
-For required fields, `extract` is the setup expressions followed by the
-value expression. For optional fields, the value expression is wrapped
-in a presence check, and `impart` is wrapped in an `isnothing` guard.
-Also appends a `__segment_printed` marker to `exprs.print` for later
-use by `segments(id)`.
+Build a `SegmentOutput` for a value-carrying segment with the standard
+required/optional split. Mirrors `push_value_segment!` wrapping logic:
+optional fields get a presence-guarded extract and isnothing-guarded impart.
 """
-function push_value_segment!(exprs::IdExprs;
-        nbits::Int, kind::Symbol, fieldvar::Symbol, desc::String,
-        shortform::String,
+function value_segment_output(;
+        nbits::Int, fieldvar::Symbol, desc::String, shortform::String,
         argvar::Symbol, base_argtype::Any, option::Union{Nothing, Symbol},
+        sentinel::Union{Nothing, SentinelSpec} = nothing,
+        parsed::UnitRange{Int}, printed::UnitRange{Int},
+        parse::Vector{ExprVarLine},
         extract_setup::Vector{ExprVarLine}, extract_value::Any,
-        present_check::Any, impart_body::Vector{Any})
+        present_check::Any = true,
+        impart_body::Vector{Any}, print::Vector{ExprVarLine})
     seg_extract = if isnothing(option)
         ExprVarLine[extract_setup..., extract_value]
     else
@@ -183,10 +184,10 @@ function push_value_segment!(exprs::IdExprs;
         Any[wrapped], :(Union{$base_argtype, Nothing})
     end
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
-    push!(exprs.segments, IdValueSegment((
-        nbits, kind, label, desc, shortform,
-        seg_argtype, argvar, seg_extract, seg_impart, option)))
-    push!(exprs.print, :(__segment_printed = $(length(exprs.segments))))
+    SegmentOutput(
+        SegmentBounds(parsed, printed, nbits, sentinel),
+        SegmentCodegen(parse, seg_extract, copy(extract_setup), seg_impart, print),
+        SegmentMeta(label, desc, shortform, seg_argtype, argvar))
 end
 
 """
@@ -324,4 +325,48 @@ unclaimed_sentinel(nctx::NodeCtx) =
 
 function claim_sentinel!(nctx::NodeCtx, position::Int, nbits::Int)
     nctx[:optional_sentinel][] = OptSentinel((position, nbits))
+end
+
+## SegmentOutput processing
+#
+# Bridge between the new SegmentOutput return type and the existing
+# IdExprs/DefIdState mutation model. Handlers return SegmentOutput;
+# this function performs all the side effects they used to do inline.
+
+"""
+    process_segment_output!(exprs, state, nctx, kind, output)
+
+Process a `SegmentOutput` returned by a segment handler, performing all
+framework-level state mutations: expression accumulation, bit allocation,
+sentinel claiming, byte bounds tracking, and segment registration.
+"""
+function process_segment_output!(exprs::IdExprs, state::DefIdState,
+                                 nctx::NodeCtx, kind::Symbol, output::SegmentOutput)
+    (; bounds, codegen, meta) = output
+    option = get(nctx, :optional, nothing)
+    # Parse codegen
+    append!(exprs.parse, codegen.parse)
+    # Bit allocation
+    if bounds.nbits > 0
+        state.bits += bounds.nbits
+    end
+    # Sentinel claiming
+    if !isnothing(bounds.sentinel) && unclaimed_sentinel(nctx)
+        claim_sentinel!(nctx, state.bits + bounds.sentinel.offset, bounds.sentinel.width)
+    end
+    # Byte bounds
+    inc_parsed!(nctx, first(bounds.parsed), last(bounds.parsed))
+    inc_print!(nctx, first(bounds.printed), last(bounds.printed))
+    # Print codegen routing (optional fields route through oprint_detect)
+    emit_print_detect!(exprs, nctx, option, codegen.print_detect)
+    append!(exprs.print, codegen.print)
+    # Segment registration (IdValueSegment for compatibility)
+    argvar = if isnothing(meta.argvar); :_ else meta.argvar end
+    push!(exprs.segments, IdValueSegment((
+        bounds.nbits, kind, meta.label, meta.desc, meta.shortform,
+        meta.argtype, argvar,
+        codegen.extract, codegen.impart, option)))
+    push!(exprs.print, :(__segment_printed = $(length(exprs.segments))))
+    # Store for assembly-phase use
+    push!(state.segment_outputs, kind => output)
 end

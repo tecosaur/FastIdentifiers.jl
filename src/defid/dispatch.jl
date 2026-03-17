@@ -17,22 +17,30 @@ function defid_dispatch!(exprs::IdExprs,
     elseif node === :optional
         defid_optional!(exprs, state, nctx, args)
     elseif node === :skip
-        defid_skip!(exprs, state, nctx, args)
+        output = compile_skip(state, nctx, args)
+        if isempty(output.meta.desc)
+            # Skip without print: apply parse codegen and byte bounds only
+            append!(exprs.parse, output.codegen.parse)
+            inc_parsed!(nctx, first(output.bounds.parsed), last(output.bounds.parsed))
+        else
+            process_segment_output!(exprs, state, nctx, :skip, output)
+        end
     elseif node === :choice
         defid_choice!(exprs, state, nctx, args)
     elseif node === :literal
-        length(args) == 1 || throw(ArgumentError("Expected exactly one argument for literal, got $(length(args))"))
-        lit = args[1]
-        lit isa String || throw(ArgumentError("Expected a string literal for literal, got $lit"))
-        defid_literal!(exprs, state, nctx, lit)
+        output = compile_literal(state, nctx, args)
+        process_segment_output!(exprs, state, nctx, :literal, output)
     elseif node === :digits
-        defid_digits!(exprs, state, nctx, args)
+        output = compile_digits(state, nctx, args)
+        process_segment_output!(exprs, state, nctx, :digits, output)
     elseif node in (:letters, :alphnum, :hex, :charset)
         defid_charseq!(exprs, state, nctx, args, node)
     elseif node === :embed
-        defid_embed!(exprs, state, nctx, args)
+        output = compile_embed(state, nctx, args)
+        process_segment_output!(exprs, state, nctx, :embed, output)
     elseif node === :checkdigit
-        defid_checkdigit!(exprs, state, nctx, args)
+        output = compile_checkdigit(exprs, state, nctx, args)
+        process_segment_output!(exprs, state, nctx, :checkdigit, output)
     else
         throw(ArgumentError("Unknown pattern node $node"))
     end
@@ -74,7 +82,8 @@ function defid_dispatch!(exprs::IdExprs,
         end
         defid_dispatch!(exprs, state, nctx, name, args)
     elseif thing isa String
-        defid_literal!(exprs, state, nctx, thing)
+        output = compile_literal(state, nctx, Any[thing])
+        process_segment_output!(exprs, state, nctx, :literal, output)
     elseif thing === :__first_nonskip
         root = nctx[:current_branch]
         root.parsed_min = 0

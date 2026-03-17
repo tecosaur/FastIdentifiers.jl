@@ -7,6 +7,10 @@ using FastIdentifiers: FastIdentifiers, AbstractIdentifier, MalformedIdentifier,
     ChecksumViolation, shortcode, purlprefix, segments, nbits, parsebytes, tobytes,
     parsebounds, printbounds, idchecksum, idcode
 
+include("../packed/PackedParsers.jl")
+using .PackedParsers: SentinelSpec, SegmentBounds, SegmentCodegen, SegmentMeta,
+    SegmentOutput, SegmentDef, segment_set, all_kwargs
+
 include("utils.jl")
 include("core.jl")
 include("loaders.jl")
@@ -71,7 +75,7 @@ macro defid(name, pattern, args...)
         kwname === :purlprefix && (prefix_val = kwval)
     end
     root = ParseBranch(1, nothing, nothing, 0, 0, 0, 0, 0)
-    state = DefIdState(name, __module__, 0, casefold_val, prefix_val, ParseBranch[root], String[], nothing)
+    state = DefIdState(name, __module__, 0, casefold_val, prefix_val, ParseBranch[root], String[], nothing, Pair{Symbol, SegmentOutput}[])
     nctx = NodeCtx(:current_branch, root)
     exprs = IdExprs(([], [], [], []))
     if !isnothing(prefix_val)
