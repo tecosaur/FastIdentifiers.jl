@@ -33,7 +33,7 @@ macro reexport()
 end
 
 include("api.jl")
-include("defid/defid.jl")
+include("defid.jl")
 using .DefId: @defid
 
 end

@@ -128,6 +128,39 @@ end
 
 ## Optional branching
 
+# Replace placeholder `true` conditions in optional segment extracts with the
+# resolved sentinel presence check.
+function patch_optional_extracts!(segments::Vector{ValueSegment},
+                                  seg_range::UnitRange{Int}, check::Expr)
+    for i in seg_range
+        extract = segments[i].extract
+        isempty(extract) && continue
+        last_expr = extract[end]
+        if Meta.isexpr(last_expr, :if) && last_expr.args[1] === true
+            last_expr.args[1] = check
+        end
+    end
+end
+
+# Build a parse-time cleanup expression that rewinds pos and (when multiple
+# bits were packed) clears the optional's stale bits via a bitmask.
+function optional_rewind_expr(state::ParserState, optvar::Symbol,
+                              savedpos::Symbol, bits_before::Int)
+    opt_bits = state.bits - bits_before
+    if opt_bits > 1
+        mT = cardtype(opt_bits)
+        mask = typemax(mT) >> (8 * sizeof(mT) - opt_bits)
+        clear = :(parsed = Core.Intrinsics.and_int(parsed,
+            Core.Intrinsics.not_int(
+                Core.Intrinsics.shl_int(
+                    __cast_to_id($mT, $mask),
+                    8 * sizeof($(esc(state.name))) - $(state.bits)))))
+        :(if !$optvar; pos = $savedpos; $clear end)
+    else
+        :(if !$optvar; pos = $savedpos end)
+    end
+end
+
 function pattern_optional!(exprs::PatternExprs,
                            state::ParserState, nctx::NodeCtx,
                            segments::NamedTuple, global_kwargs::Tuple,
@@ -150,6 +183,7 @@ function pattern_optional!(exprs::PatternExprs,
     nctx = NodeCtx(nctx, :optional_sentinel, sentinel_ref)
     seg_start = length(exprs.segments)
     bits_before = state.bits
+    # Walk children into a separate parse/print accumulator
     oexprs = (; parse = ExprVarLine[], print = ExprVarLine[], segments = exprs.segments, properties = exprs.properties)
     if all(a -> a isa String, args)
         def = getfield(segments, :choice)
@@ -160,54 +194,28 @@ function pattern_optional!(exprs::PatternExprs,
             pattern_dispatch!(oexprs, state, nctx, segments, global_kwargs, arg)
         end
     end
-    seg_end = length(exprs.segments)
+    # Ensure a sentinel exists (allocate an explicit presence bit if none was claimed)
     if sentinel_ref[] === nothing
         flag_nbits = (state.bits += 1)
         push!(oexprs.parse, emit_pack(state, Bool, optvar, flag_nbits))
         sentinel_ref[] = OptSentinel((flag_nbits, 1))
     end
-    # Patch segment extract conditions with the resolved sentinel check
     sentinel = sentinel_ref[]
     check = :(!iszero($(emit_extract(state, sentinel.position, sentinel.nbits))))
-    for i in seg_start+1:seg_end
-        extract = exprs.segments[i].extract
-        isempty(extract) && continue
-        last_expr = extract[end]
-        if Meta.isexpr(last_expr, :if) && last_expr.args[1] === true
-            last_expr.args[1] = check
-        end
-    end
+    patch_optional_extracts!(exprs.segments, seg_start+1:length(exprs.segments), check)
     # Merge max back to parent; min stays unchanged (optional content doesn't raise the guarantee)
     parent.parsed_max += child.parsed_max - child.start_min
     parent.print_max = Base.max(parent.print_max, child.print_max)
-    # Build the branch guard (nested optionals require the parent flag too)
+    # Emit parse-time guard, body, label, and cleanup
     savedpos = gensym("savedpos")
     branch_check = Expr(:call, :__branch_check, Bool, child.id)
-    guard = if isnothing(popt)
-        branch_check
-    else
-        :($popt && $branch_check)
-    end
+    guard = if isnothing(popt); branch_check else :($popt && $branch_check) end
     push!(exprs.parse, :($savedpos = pos))
     push!(exprs.parse, :($optvar = $guard))
     push!(exprs.parse, :(if $optvar; $(oexprs.parse...) end))
     push!(exprs.parse, :(@label $end_label))
-    # Cleanup: rewind pos and clear any bits packed by partial success
-    opt_bits = state.bits - bits_before
-    if opt_bits > 1  # single segment: failure already leaves zero bits
-        opt_width = opt_bits
-        mask_type = cardtype(opt_width)
-        mask_val = typemax(mask_type) >> (8 * sizeof(mask_type) - opt_width)
-        clear_expr = :(parsed = Core.Intrinsics.and_int(parsed,
-            Core.Intrinsics.not_int(
-                Core.Intrinsics.shl_int(
-                    __cast_to_id($mask_type, $mask_val),
-                    8 * sizeof($(esc(state.name))) - $(state.bits)))))
-        push!(exprs.parse, :(if !$optvar; pos = $savedpos; $clear_expr end))
-    else
-        push!(exprs.parse, :(if !$optvar; pos = $savedpos end))
-    end
-    # Print-time presence detection: single assignment from the sentinel
+    push!(exprs.parse, optional_rewind_expr(state, optvar, savedpos, bits_before))
+    # Print-time presence detection
     append!(exprs.print, nctx[:oprint_detect])
     push!(exprs.print, :($optvar = $check))
     push!(exprs.print, :(if $optvar; $(oexprs.print...) end))

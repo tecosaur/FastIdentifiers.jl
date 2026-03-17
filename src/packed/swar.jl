@@ -392,28 +392,27 @@ end
 # Shared vocabulary for all digit-parse strategies: symbols, encoding
 # expressions, range checks, and error messages. Used by the three
 # strategy functions below.
-function gen_rangecheck(var::Symbol, dspec::NamedTuple, state::ParserState)
+function gen_rangecheck(state::ParserState, var::Symbol, dspec::NamedTuple)
     (; base, mindigits, maxdigits, min, max, pad) = dspec
     needsmax = max < base^maxdigits - 1
     needsmin = min > 0
     if !needsmax && !needsmin
         :()
     elseif needsmax && !needsmin
-        maxerr = register_errmsg(state, "Expected at most a value of $(string(max; base, pad))")
+        maxerr = register_errmsg!(state, "Expected at most a value of $(string(max; base, pad))")
         :($var <= $max || return ($maxerr, pos))
     elseif needsmin && !needsmax
-        minerr = register_errmsg(state, "Expected at least a value of $(string(min; base, pad))")
+        minerr = register_errmsg!(state, "Expected at least a value of $(string(min; base, pad))")
         :($var >= $min || return ($minerr, pos))
     else
-        maxerr = register_errmsg(state, "Expected at most a value of $(string(max; base, pad))")
-        minerr = register_errmsg(state, "Expected at least a value of $(string(min; base, pad))")
+        maxerr = register_errmsg!(state, "Expected at most a value of $(string(max; base, pad))")
+        minerr = register_errmsg!(state, "Expected at least a value of $(string(min; base, pad))")
         :($var >= $min || return ($minerr, pos); $var <= $max || return ($maxerr, pos))
     end
 end
 
-function compute_digit_vocab(fieldvar::Symbol, option,
-                             dspec::NamedTuple, state::ParserState,
-                             nctx::NodeCtx)
+function compute_digit_vocab(state::ParserState, nctx::NodeCtx,
+                             fieldvar::Symbol, option, dspec::NamedTuple)
     (; base, mindigits, maxdigits, min, max, pad, dI, dT, claims_sentinel) = dspec
     fixedwidth = mindigits == maxdigits
     fnum = Symbol("$(fieldvar)_num")
@@ -431,28 +430,21 @@ function compute_digit_vocab(fieldvar::Symbol, option,
     end
     directvar = numexpr === fnum
     parsevar = if directvar; fnum else fieldvar end
-    rangecheck = gen_rangecheck(fnum, dspec, state)
-    # Error message and failure expression for digit count violations
-    errmsg = register_errmsg(state,
-        if fixedwidth && maxdigits > 1
-            "exactly $maxdigits digits in base $base"
-        elseif mindigits > 1
-            "$mindigits to $maxdigits digits in base $base"
-        else
-            "up to $maxdigits digits in base $base"
-        end)
-    fail_expr = if isnothing(option)
-        :(return ($errmsg, pos))
+    rangecheck = gen_rangecheck(state, fnum, dspec)
+    fail_expr = build_fail_expr!(state, nctx, if fixedwidth && maxdigits > 1
+        "exactly $maxdigits digits in base $base"
+    elseif mindigits > 1
+        "$mindigits to $maxdigits digits in base $base"
     else
-        opt_fail_expr(option, nctx[:opt_label])
-    end
+        "up to $maxdigits digits in base $base"
+    end)
     (; fnum, fieldvar, parsevar, directvar, numexpr, rangecheck,
-       fail_expr, option, dT, errmsg)
+       fail_expr, option, dT)
 end
 
 # Scalar `parseint` fallback for digit fields where SWAR isn't applicable.
-function gen_digit_parseint(vocab, dspec::NamedTuple,
-                            state::ParserState, nctx::NodeCtx)
+function gen_digit_parseint(state::ParserState, nctx::NodeCtx,
+                            vocab, dspec::NamedTuple)
     (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
     (; base, mindigits, maxdigits) = dspec
     fixedwidth = mindigits == maxdigits
@@ -475,12 +467,12 @@ end
 # Shared skeleton for fixed-width digit strategies: length guard +
 # required/optional branching. `check_fn(on_fail)` must return
 # `Vector{ExprVarLine}` of digit-validation expressions.
-function gen_digit_fixed_guarded(vocab, state::ParserState, nctx::NodeCtx,
+function gen_digit_fixed_guarded(state::ParserState, nctx::NodeCtx, vocab,
                                  nd::Int,
                                  load_exprs::Vector{ExprVarLine},
                                  check_fn,
                                  parse_and_encode::Vector{ExprVarLine})
-    (; fail_expr, errmsg, rangecheck, directvar, fieldvar, numexpr) = vocab
+    (; fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
     b = nctx[:current_branch]
     len_check = Expr(:call, :__length_check, b.id, b.parsed_max, nd, nd, nd)
     result = ExprVarLine[
@@ -501,20 +493,20 @@ Fixed-width SWAR for 1–16 digit fields.
 Single-chunk for ≤8 digits, two-chunk (upper UInt64 + lower sub-word) for
 9–16. Load strategy preference: backward > forward-overread > exact sub-loads.
 """
-function gen_digit_swar_fixed(vocab, dspec::NamedTuple,
-                              state::ParserState, nctx::NodeCtx)
+function gen_digit_swar_fixed(state::ParserState, nctx::NodeCtx,
+                              vocab, dspec::NamedTuple)
     (; fnum, fieldvar) = vocab
     (; base, maxdigits, dI) = dspec
     if maxdigits <= sizeof(UInt)
-        gen_swar_fixed_single(vocab, dspec, state, nctx)
+        gen_swar_fixed_single(state, nctx, vocab, dspec)
     else
-        gen_swar_fixed_twochunk(vocab, dspec, state, nctx)
+        gen_swar_fixed_twochunk(state, nctx, vocab, dspec)
     end
 end
 
 # Single-chunk path (1–8 digits)
-function gen_swar_fixed_single(vocab, dspec::NamedTuple,
-                                state::ParserState, nctx::NodeCtx)
+function gen_swar_fixed_single(state::ParserState, nctx::NodeCtx,
+                                vocab, dspec::NamedTuple)
     (; fnum, fieldvar) = vocab
     (; base, maxdigits, dI) = dspec
     sT = register_type(maxdigits)
@@ -535,14 +527,14 @@ function gen_swar_fixed_single(vocab, dspec::NamedTuple,
     check_fn = on_fail -> gen_swar_chunk(sT, swar_var, maxdigits, base, on_fail)[1]
     parse_expr = if maxdigits == 1; ExprVarLine[] else gen_swarparse(sT, swar_var, base, maxdigits) end
     swar_cast = if sT == dI; :($fnum = $swar_var) else :($fnum = $swar_var % $dI) end
-    gen_digit_fixed_guarded(vocab, state, nctx, maxdigits,
+    gen_digit_fixed_guarded(state, nctx, vocab, maxdigits,
                             ExprVarLine[load], check_fn,
                             ExprVarLine[parse_expr..., swar_cast])
 end
 
 # Two-chunk path (9–16 digits): upper UInt64 + lower sub-word
-function gen_swar_fixed_twochunk(vocab, dspec::NamedTuple,
-                                  state::ParserState, nctx::NodeCtx)
+function gen_swar_fixed_twochunk(state::ParserState, nctx::NodeCtx,
+                                  vocab, dspec::NamedTuple)
     (; fnum, fieldvar) = vocab
     (; base, maxdigits, dI) = dspec
     upper_nd = sizeof(UInt)
@@ -563,7 +555,7 @@ function gen_swar_fixed_twochunk(vocab, dspec::NamedTuple,
     _, lower_parse = gen_swar_chunk(lower_sT, lower_var, lower_nd, base, nothing)
     scale = UInt64(base) ^ lower_nd
     combine = :($fnum = ($(upper_var) * $scale + $(lower_var) % UInt64) % $dI)
-    gen_digit_fixed_guarded(vocab, state, nctx, maxdigits, load_exprs, check_fn,
+    gen_digit_fixed_guarded(state, nctx, vocab, maxdigits, load_exprs, check_fn,
                             ExprVarLine[upper_parse..., lower_parse..., combine])
 end
 
@@ -576,8 +568,8 @@ Load strategy preference: backward > forward-overread > cascading exact-loads.
 Both runtime and compile-time paths are emitted; `fold_static_branches!`
 selects the winner based on resolved length guarantees.
 """
-function gen_digit_swar_variable(vocab, dspec::NamedTuple,
-                                 state::ParserState, nctx::NodeCtx)
+function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx,
+                                 vocab, dspec::NamedTuple)
     (; fnum, fail_expr, option, fieldvar) = vocab
     (; base, mindigits, maxdigits, dI) = dspec
     sT = register_type(Base.min(maxdigits, sizeof(UInt)))
@@ -593,21 +585,20 @@ function gen_digit_swar_variable(vocab, dspec::NamedTuple,
         :($fnum = $swar_cast_var)]
     b = nctx[:current_branch]
     backward = b.parsed_min >= sizeof(sT) - 1
-    availvar = Symbol("$(fieldvar)_avail")
-    avail_bound = emit_lengthbound(state, nctx, maxdigits)
+    vdjob = (; sT, swar_var, countvar,
+               availvar = Symbol("$(fieldvar)_avail"),
+               avail_bound = emit_lengthbound(state, nctx, maxdigits))
     load_and_count = if backward
-        gen_vardigit_backward(vocab, sT, swar_var, countvar, availvar,
-                               avail_bound, base, mindigits, maxdigits, b)
+        gen_vardigit_backward(state, nctx, vocab, dspec, vdjob, b)
     else
-        gen_vardigit_forward(vocab, state, nctx, sT, swar_var, countvar, availvar,
-                              avail_bound, base, mindigits, maxdigits, b)
+        gen_vardigit_forward(state, nctx, vocab, dspec, vdjob, b)
     end
     (; rangecheck, directvar, fieldvar, numexpr, fail_expr) = vocab
     # When the SWAR register is wider than dI, the range check must test
     # swar_var (full width) rather than fnum (after truncation), since
     # values like 256 would wrap to 0 in a UInt8 and pass a <= 255 check.
     pre_rangecheck = if sT != dI
-        gen_rangecheck(swar_var, dspec, state)
+        gen_rangecheck(state, swar_var, dspec)
     else
         rangecheck
     end
@@ -622,8 +613,10 @@ end
 
 # Backward strategy for variable-width: single wide load ending at
 # pos + avail - 1, then right-shift to low-align. Branchless digit count.
-function gen_vardigit_backward(vocab, sT, swar_var, countvar, availvar,
-                                avail_bound, base, mindigits, maxdigits, b)
+function gen_vardigit_backward(state::ParserState, nctx::NodeCtx,
+                                vocab, dspec::NamedTuple, vdjob, b::ParseBranch)
+    (; sT, swar_var, countvar, availvar, avail_bound) = vdjob
+    (; base, mindigits, maxdigits) = dspec
     backload = ExprVarLine[
         :($swar_var = htol(Base.unsafe_load(
             Ptr{$sT}(pointer(idbytes, pos + $availvar - $(sizeof(sT))))))),
@@ -638,8 +631,10 @@ end
 
 # Forward-overread + cascading fallback for variable-width.
 # Emits both paths gated by __static_length_check; fold_static_branches! picks the winner.
-function gen_vardigit_forward(vocab, state, nctx, sT, swar_var, countvar, availvar,
-                               avail_bound, base, mindigits, maxdigits, b)
+function gen_vardigit_forward(state::ParserState, nctx::NodeCtx,
+                               vocab, dspec::NamedTuple, vdjob, b::ParseBranch)
+    (; sT, swar_var, countvar, availvar, avail_bound) = vdjob
+    (; base, mindigits, maxdigits) = dspec
     # Forward overread: single full-width load at pos, digits at LSB
     fwdload = ExprVarLine[
         :($swar_var = htol(Base.unsafe_load(Ptr{$sT}(pointer(idbytes, pos))))),
@@ -668,17 +663,17 @@ is within register limits, scalar `parseint` otherwise.
 function gen_digit_parse(state::ParserState, nctx::NodeCtx,
                          fieldvar::Symbol, option,
                          dspec::NamedTuple)
-    vocab = compute_digit_vocab(fieldvar, option, dspec, state, nctx)
+    vocab = compute_digit_vocab(state, nctx, fieldvar, option, dspec)
     (; mindigits, maxdigits, base) = dspec
     fixedwidth = mindigits == maxdigits
     swar_limit = if fixedwidth; 2 * sizeof(UInt) else sizeof(UInt) end
     use_swar = base <= 16 && maxdigits <= swar_limit
     exprs = if !use_swar
-        gen_digit_parseint(vocab, dspec, state, nctx)
+        gen_digit_parseint(state, nctx, vocab, dspec)
     elseif fixedwidth
-        gen_digit_swar_fixed(vocab, dspec, state, nctx)
+        gen_digit_swar_fixed(state, nctx, vocab, dspec)
     else
-        gen_digit_swar_variable(vocab, dspec, state, nctx)
+        gen_digit_swar_variable(state, nctx, vocab, dspec)
     end
     (; exprs, vocab.parsevar, vocab.directvar)
 end

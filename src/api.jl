@@ -255,11 +255,3 @@ function Base.isless(a::T, b::T) where {T <: AbstractIdentifier}
     (isnothing(ca) || isnothing(cb)) && return isless(shortcode(a), shortcode(b))
     ca < cb
 end
-
-# @defid machinery stubs — extended by generated methods
-function segments end
-function parsebytes end
-function tobytes end
-function parsebounds end
-function printbounds end
-nbits(@nospecialize(T::DataType)) = 8 * sizeof(T)

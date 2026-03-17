@@ -12,14 +12,7 @@ function compile_literal(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::
     length(args) == 1 || throw(ArgumentError("Expected exactly one argument for literal, got $(length(args))"))
     lit = args[1]
     lit isa String || throw(ArgumentError("Expected a string literal for literal, got $lit"))
-    option = get(nctx, :optional, nothing)
-    opt_label = get(nctx, :opt_label, nothing)
-    notfound = if isnothing(option)
-        errsym = register_errmsg(state, "Expected literal '$(lit)'")
-        :(return ($errsym, pos))
-    else
-        opt_fail_expr(option, opt_label)
-    end
+    notfound = build_fail_expr!(state, nctx, "Expected literal '$(lit)'")
     casefold = get(nctx, :casefold, false) === true
     casefold && !all(isascii, lit) &&
         throw(ArgumentError("Expected ASCII string for literal with casefolding"))

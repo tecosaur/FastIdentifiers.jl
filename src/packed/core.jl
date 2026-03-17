@@ -63,7 +63,6 @@ end
 Global mutable state for pattern compilation (bit width, branches, errors).
 
 - `supertype`: abstract supertype for the generated primitive type
-- `method_module`: target module for GlobalRef in generated method definitions
 - `globals`: domain-specific keyword arguments for finalize hooks to read
 """
 mutable struct ParserState
@@ -71,7 +70,6 @@ mutable struct ParserState
     const mod::Module
     bits::Int
     const supertype::Type
-    const method_module::Module
     const globals::NamedTuple
     const branches::Vector{ParseBranch}
     const errconsts::Vector{String}
@@ -166,14 +164,14 @@ function inc_print!(nctx::NodeCtx, dmin, dmax)
 end
 
 """
-    register_errmsg(state::ParserState, msg::String) -> Int
+    register_errmsg!(state::ParserState, msg::String) -> Int
 
 Register a compile-time error message and return its 1-based index.
 
 The index is used as an error code in the generated `parsebytes` function,
 mapped back to the message string at `parse` time.
 """
-function register_errmsg(state::ParserState, msg::String)
+function register_errmsg!(state::ParserState, msg::String)
     push!(state.errconsts, msg)
     length(state.errconsts)
 end
@@ -192,10 +190,9 @@ required/optional split: optional fields get a presence-guarded extract
 and isnothing-guarded impart.
 """
 function value_segment_output(;
-        nbits::Int, fieldvar::Symbol, desc::String, shortform::String,
+        bounds::SegmentBounds,
+        fieldvar::Symbol, desc::String, shortform::String,
         argvar::Symbol, base_argtype::Any, option::Union{Nothing, Symbol},
-        sentinel::Union{Nothing, SentinelSpec} = nothing,
-        parsed::UnitRange{Int}, printed::UnitRange{Int},
         parse::Vector{ExprVarLine},
         extract_setup::Vector{ExprVarLine}, extract_value::Any,
         present_check::Any = true,
@@ -213,7 +210,7 @@ function value_segment_output(;
     end
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     SegmentOutput(
-        SegmentBounds(parsed, printed, nbits, sentinel),
+        bounds,
         SegmentCodegen(parse, seg_extract, copy(extract_setup), seg_impart, print),
         SegmentMeta(label, desc, shortform, seg_argtype, argvar))
 end
@@ -345,6 +342,18 @@ end
 # Build the failure block for an optional scope: set flag=false, jump to cleanup label.
 function opt_fail_expr(flag::Symbol, label::Symbol)
     Expr(:block, :($flag = false), :(@goto $label))
+end
+
+# Build a parse-failure expression: `return (erridx, pos)` in required context,
+# `opt_fail_expr(...)` inside an optional scope.
+function build_fail_expr!(state::ParserState, nctx::NodeCtx, msg::String)
+    option = get(nctx, :optional, nothing)
+    if isnothing(option)
+        erridx = register_errmsg!(state, msg)
+        :(return ($erridx, pos))
+    else
+        opt_fail_expr(option, nctx[:opt_label])
+    end
 end
 
 ## Optional sentinel helpers

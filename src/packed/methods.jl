@@ -9,7 +9,34 @@
 # generated type. `assemble_type` is the orchestrator that wires them all
 # into a single `:toplevel` block.
 
-## Top-level assembly
+## Top-level entry point
+
+"""
+    maketype(segments, mod, name, pattern; kwargs...) -> Expr(:toplevel, ...)
+
+Full compilation pipeline: create state, walk the pattern, and assemble all
+method definitions for a bit-packed primitive type.
+
+Returns a `:toplevel` expression block ready for `eval`.
+"""
+function maketype(segments::NamedTuple, mod::Module, name::Symbol, pattern;
+                  supertype::Type = Any,
+                  casefold::Bool = true,
+                  globals::NamedTuple = (;),
+                  global_kwargs::Tuple = (),
+                  finalize_fn::Function = default_finalize!)
+    root = ParseBranch(1, nothing, :root, 0, 0, 0, 0, 0, 0)
+    state = ParserState(name, mod, 0, supertype,
+                        globals, ParseBranch[root], String[], Pair{Symbol, SegmentOutput}[])
+    nctx = NodeCtx(:current_branch, root)
+    nctx = NodeCtx(nctx, :casefold, casefold)
+    exprs = PatternExprs(([], [], [], []))
+    push!(exprs.parse, Expr(:call, :__branch_check, root.id, nothing))
+    pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, pattern)
+    assemble_type(exprs, state, name, segments; finalize_fn)
+end
+
+## Assembly
 
 """
     assemble_type(exprs, state, name, segments; finalize_fn) -> Expr(:toplevel, ...)
@@ -29,7 +56,7 @@ function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
     numbits = 8 * cld(state.bits, 8)
     implement_casting!(state, exprs.print)
     root = state.branches[1]
-    M = state.method_module
+    M = PackedParselets
     push!(block.args,
           :(Base.@__doc__(primitive type $(esc(name)) <: $(state.supertype) $numbits end)),
           :($(GlobalRef(M, :nbits))(::Type{$(esc(name))}) = $(state.bits)),
@@ -73,7 +100,7 @@ end
 function assemble_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{ValueSegment},
                               state::ParserState, name::Symbol)
     parsed_min = state.branches[1].parsed_min
-    M = state.method_module
+    M = PackedParselets
     # Primary pass: optimal length-check insertion with sentinel resolution
     resolved = implement_casting!(state, pexprs)
     insert_length_checks!(resolved, state.branches, state)
@@ -88,7 +115,7 @@ function assemble_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{Value
     end
     # Replace the root __branch_check sentinel with an upfront minimum-length check
     formstr = segments_formstring(segments, state.branches)
-    errmsg = register_errmsg(state, string(
+    errmsg = register_errmsg!(state, string(
         "Expected at least ", parsed_min, " bytes",
         isempty(formstr) ? "" : string(", must match the form '", formstr, "'")))
     split_idx = findfirst(resolved) do e
@@ -119,12 +146,12 @@ function assemble_tobytes(pexprs::Vector{ExprVarLine}, state::ParserState, name:
     maxbytes = root.print_max
     minbytes = root.print_min
     fixedlen = minbytes == maxbytes
-    M = state.method_module
+    M = PackedParselets
     # Build buffer-based expressions from the print expressions,
     # stripping __segment_printed assignments used only by segments()
     bufexprs = map(strip_segsets! ∘ copy, pexprs)
     filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, bufexprs)
-    rewrite_bufprint!(bufexprs, M)
+    rewrite_bufprint!(bufexprs)
     :(function $(GlobalRef(M, :tobytes))(id::$(esc(name)))
           buf = $(if fixedlen
                       :(Base.StringMemory($maxbytes))
@@ -152,7 +179,7 @@ end
 function assemble_string(state::ParserState, name::Symbol)
     root = state.branches[1]
     fixedlen = root.print_min == root.print_max
-    M = state.method_module
+    M = PackedParselets
     if fixedlen
         :(function $(GlobalRef(Base, :string))(id::$(esc(name)))
               buf, _ = $(GlobalRef(M, :tobytes))(id)
@@ -316,7 +343,7 @@ end
 
 function assemble_segments_type(segs::Vector{ValueSegment}, state::ParserState, name::Symbol)
     isempty(segs) && return :()
-    M = state.method_module
+    M = PackedParselets
     :(function $(GlobalRef(M, :segments))(::Type{$(esc(name))})
           $(Expr(:tuple, [(; nbits=s.nbits, kind=s.kind, label=s.label, desc=s.desc, shortform=s.shortform)
                           for s in segs if s.nbits > 0]...))
@@ -326,7 +353,7 @@ end
 function assemble_segments_value(segs::Vector{ValueSegment}, pexprs::Vector{ExprVarLine},
                                   state::ParserState, name::Symbol)
     isempty(segs) && return :()
-    M = state.method_module
+    M = PackedParselets
     svars = Tuple{Int, Symbol}[]
     pexprs2 = map(copy, pexprs)
     for expr in pexprs2
@@ -415,8 +442,7 @@ into direct `Memory{UInt8}` buffer operations (`bufprint`, `bufprintchars`,
 
 Recurses into nested expressions. Modifies `pexprs` in place.
 """
-function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}},
-                           method_module::Module = PackedParselets)
+function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
     splices = Tuple{Int, Vector{Any}}[]
     for (i, expr) in enumerate(pexprs)
         if Meta.isexpr(expr, :call) && length(expr.args) >= 3 && expr.args[2] == :io
@@ -428,7 +454,7 @@ function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}},
             elseif fname == :printchars
                 Any[:(pos = bufprintchars(buf, pos, $(args...)))]
             elseif fname == :__tobytes_print
-                tobytes_ref = GlobalRef(method_module, :tobytes)
+                tobytes_ref = GlobalRef(PackedParselets, :tobytes)
                 ebuf = gensym("ebuf")
                 elen = gensym("elen")
                 Any[:(($ebuf, $elen) = $tobytes_ref($(args...))),
@@ -439,7 +465,7 @@ function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}},
         elseif expr isa Expr
             for arg in expr.args
                 if arg isa Expr
-                    rewrite_bufprint!(arg.args, method_module)
+                    rewrite_bufprint!(arg.args)
                 end
             end
         end
@@ -496,9 +522,8 @@ end
 # These must be qualified with GlobalRef when the generated code is
 # eval'd outside the DefId module (which normally imports them).
 # Note: parsebytes/tobytes are excluded — they are API functions whose
-# method definitions already use GlobalRef(state.method_module, ...).
-# Bare references to them in finalize hooks are the hook author's
-# responsibility (defid uses GlobalRef explicitly, test hooks use PP.parsebytes).
+# method definitions already use GlobalRef(PackedParselets, ...).
+# Bare references in finalize hooks are the hook author's responsibility.
 const RUNTIME_SYMS = Set{Symbol}([
     :parsechars, :parseint, :printchars, :chars2string,
     :bufprint, :bufprintchars, :takestring!,

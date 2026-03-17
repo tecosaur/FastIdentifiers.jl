@@ -32,7 +32,6 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::V
     dI = cardtype(cardbits(max + 1))
     dT = cardtype(dbits)
     fieldvar = get(nctx, :fieldvar, gensym("digits"))
-    # Compute bit position without mutating state.bits
     nbits_pos = state.bits + dbits
     fixedpad = ifelse(fixedwidth, maxdigits, 0)
     printmin = Base.max(ndigits(Base.max(min, 1); base), pad, fixedpad)
@@ -46,7 +45,6 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::V
     posadv = ifelse(fixedwidth, maxdigits, bitsconsumed)
     parse_exprs = ExprVarLine[parsed.exprs...,
         emit_pack(state, dT, parsevar, nbits_pos), :(pos += $posadv)]
-    # Extract and print
     fextract = :($fnum = $(emit_extract(state, nbits_pos, dbits)))
     fcast = if dI == dT; fnum else :($fnum % $dI) end
     fvalue = if iszero(min) && claims
@@ -70,14 +68,12 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::V
     print_exprs = ExprVarLine[]
     directvar || push!(print_exprs, :($fieldvar = $fvalue))
     push!(print_exprs, printex)
-    # Property extract value
     propvalue = if max < typemax(dI) ÷ 2
         sI = signed(dI)
         :($fvalue % $sI)
     else
         fvalue
     end
-    # Constructor impart
     argvar = gensym("arg_digit")
     directval = cardbits(max - min + 1 + claims) ==
                 cardbits(max + 1) && (min > 0 || !claims)
@@ -99,7 +95,6 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::V
     push!(body, :($fnum = $argvar % $dI))
     directvar || push!(body, encode_expr)
     push!(body, emit_pack(state, dT, parsevar, nbits_pos))
-    # Metadata
     seg_shortform = let charset = if base <= 10; "0-$(Char('0' + base - 1))"
                                    else "0-9A-$(Char('A' + base - 11))" end
         count = if fixedwidth; "$maxdigits" else "$mindigits:$maxdigits" end
@@ -117,9 +112,9 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::V
                       else "" end)
     sentinel = if claims; SentinelSpec((0, dbits)) else nothing end
     value_segment_output(;
-        nbits=dbits, fieldvar, desc=seg_desc, shortform=seg_shortform,
+        bounds=SegmentBounds(mindigits:maxdigits, printmin:printmax, dbits, sentinel),
+        fieldvar, desc=seg_desc, shortform=seg_shortform,
         argvar, base_argtype=:Integer, option,
-        sentinel, parsed=mindigits:maxdigits, printed=printmin:printmax,
         parse=parse_exprs,
         extract_setup=ExprVarLine[fextract], extract_value=propvalue,
         impart_body=body, print=print_exprs)
@@ -269,101 +264,68 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     claim_via_length = claims && !oneindexed && variable
     optoffset = claim_via_length && minlen > 0
     directlen = variable && cardbits(maxlen + 1) == cardbits(maxlen - minlen + 1 + optoffset)
-    lenrange = if !variable
-        0
-    elseif directlen
-        maxlen + 1
-    else
-        maxlen - minlen + 1 + optoffset
+    lenbits = if !variable; 0
+    else cardbits(if directlen; maxlen + 1 else maxlen - minlen + 1 + optoffset end)
     end
-    lenbits = if variable; cardbits(lenrange) else 0 end
     totalbits = charbits + lenbits
     fieldvar = get(nctx, :fieldvar, gensym(string(kind)))
     charvar = Symbol("$(fieldvar)_chars")
     lenvar = Symbol("$(fieldvar)_len")
+    lenoffset = Symbol("$(fieldvar)_lenoff")
     cT = cardtype(charbits)
     lT = if variable; cardtype(lenbits) else Nothing end
-    # Compute bit position without mutating state.bits
     nbits_pos = state.bits + totalbits
-    # Sentinel spec for process_segment_output!
-    sentinel = if oneindexed
-        SentinelSpec((-lenbits, charbits))
-    elseif claim_via_length
-        SentinelSpec((0, lenbits))
-    else
-        nothing
-    end
+    lenbase = if directlen; 0 elseif optoffset; minlen - 1 else minlen end
+    sentinel = if oneindexed; SentinelSpec((-lenbits, charbits))
+    elseif claim_via_length; SentinelSpec((0, lenbits))
+    else nothing end
     scanlimit = emit_lengthbound(state, nctx, maxlen)
-    # Parse
-    parse_exprs = ExprVarLine[]
-    push!(parse_exprs,
-          :(($lenvar, $charvar) = parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed)))
-    errmsg = register_errmsg(state, if variable
+    notfound = build_fail_expr!(state, nctx, if variable
         "Expected $minlen to $maxlen $kind characters"
     else
         "Expected $maxlen $kind characters"
     end)
-    opt_label = get(nctx, :opt_label, nothing)
-    notfound = if isnothing(option)
-        [:(return ($errmsg, pos))]
-    else
-        [opt_fail_expr(option, opt_label)]
-    end
+    parse_exprs = ExprVarLine[
+        :(($lenvar, $charvar) = parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed))]
     if !isnothing(option) && variable && minlen == 0
-        push!(parse_exprs, :($lenvar > 0 || $(opt_fail_expr(option, opt_label))))
+        push!(parse_exprs, :($lenvar > 0 || $notfound))
     else
         push!(parse_exprs,
               :(if $(if variable; :($lenvar < $minlen) else :($lenvar != $maxlen) end)
-                    $(notfound...)
+                    $notfound
                 end))
     end
-    lenoffset = Symbol("$(fieldvar)_lenoff")
-    lenbase = if directlen
-        0
-    elseif optoffset
-        minlen - 1
-    else
-        minlen
-    end
-    push!(parse_exprs,
-          emit_pack(state, cT, charvar, nbits_pos - lenbits),
-          :(pos += $lenvar))
+    push!(parse_exprs, emit_pack(state, cT, charvar, nbits_pos - lenbits), :(pos += $lenvar))
     if variable
         lenpack = if lenbase == 0
             :($lenoffset = $lenvar % $lT)
         else
             :($lenoffset = ($lenvar - $lenbase) % $lT)
         end
-        push!(parse_exprs, lenpack,
-              emit_pack(state, lT, lenoffset, nbits_pos))
+        push!(parse_exprs, lenpack, emit_pack(state, lT, lenoffset, nbits_pos))
     end
-    # Print / extract
-    fextract_chars = :($charvar = $(emit_extract(state, nbits_pos - lenbits, charbits)))
-    extracts = ExprVarLine[fextract_chars]
+    # printchars/chars2string share the same arg pattern
+    extracts = ExprVarLine[:($charvar = $(emit_extract(state, nbits_pos - lenbits, charbits)))]
     if variable
-        fextract_len = if lenbase == 0
+        push!(extracts, if lenbase == 0
             :($lenvar = $(emit_extract(state, nbits_pos, lenbits)))
         else
             :($lenvar = $(emit_extract(state, nbits_pos, lenbits)) + $lenbase)
-        end
-        push!(extracts, fextract_len)
+        end)
     end
-    printex = if variable
-        :(printchars(io, $charvar, Int($lenvar), $ranges))
+    charargs = if variable
+        :($charvar, Int($lenvar), $ranges)
     else
-        :(printchars(io, $charvar, $maxlen, $ranges, $oneindexed))
+        :($charvar, $maxlen, $ranges, $oneindexed)
     end
-    tostringex = if variable
-        :(chars2string($charvar, Int($lenvar), $ranges))
-    else
-        :(chars2string($charvar, $maxlen, $ranges, $oneindexed))
-    end
-    # Constructor impart
+    printex = :(printchars(io, $(charargs.args...)))
+    tostringex = :(chars2string($(charargs.args...)))
     argvar = gensym("arg_charseq")
+    kindstr = String(kind)
     encode_chars = quote
         ($lenvar, $charvar) = parsechars($cT, String($argvar), $maxlen, $ranges, $cfold, $oneindexed)
         $lenvar == ncodeunits(String($argvar)) || throw(ArgumentError(
-            string("Invalid characters in \"", $argvar, "\" for ", $(String(kind)))))
+            string("Invalid characters in \"", $argvar, "\" for ", $kindstr)))
         $(if variable
               quote
                   $lenvar < $minlen && throw(ArgumentError(
@@ -377,36 +339,32 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
           end)
         $(emit_pack(state, cT, charvar, nbits_pos - lenbits))
         $(if variable
-              lenpack_expr = if lenbase == 0
+              lenpack = if lenbase == 0
                   :($lenoffset = $lenvar % $lT)
               else
                   :($lenoffset = ($lenvar - $lenbase) % $lT)
               end
-              quote
-                  $lenpack_expr
-                  $(emit_pack(state, lT, lenoffset, nbits_pos))
-              end
+              quote $lenpack; $(emit_pack(state, lT, lenoffset, nbits_pos)) end
           else
               nothing
           end)
     end
-    charseq_body = filter(e -> !isnothing(e) && !(e isa LineNumberNode), encode_chars.args)
+    impart_body = filter(e -> !isnothing(e) && !(e isa LineNumberNode), encode_chars.args)
     seg_shortform = let charset = join((string(Char(first(r)), '-', Char(last(r))) for r in ranges), "")
         count = if variable; "$minlen:$maxlen" else "$maxlen" end
-        "$charset \u00d7 $count"
+        "$charset × $count"
     end
     value_segment_output(;
-        nbits=totalbits, fieldvar,
+        bounds=SegmentBounds(minlen:maxlen, minlen:maxlen, totalbits, sentinel),
+        fieldvar,
         desc=string(if variable; "$minlen-$maxlen" else "$maxlen" end,
                     " ", kind, if maxlen > 1; " characters" else " character" end),
         shortform=seg_shortform,
         argvar, base_argtype=:AbstractString, option,
-        sentinel, parsed=minlen:maxlen, printed=minlen:maxlen,
         parse=parse_exprs,
         extract_setup=extracts, extract_value=tostringex,
-        impart_body=charseq_body, print=ExprVarLine[printex])
+        impart_body, print=ExprVarLine[printex])
 end
-
 
 ## Embedded packed types
 
@@ -415,48 +373,31 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::Ve
     T = Core.eval(state.mod, args[1])
     T isa DataType && T <: state.supertype && isprimitivetype(T) ||
         throw(ArgumentError("embed type must be a primitive $(state.supertype) subtype, got $T"))
-    # Look up methods via the method module (e.g. FastIdentifiers) since
-    # PackedParselets.nbits etc. have no concrete methods for user-defined types.
-    M = state.method_module
-    _nbits = getfield(M, :nbits)
-    _parsebounds = getfield(M, :parsebounds)
-    _printbounds = getfield(M, :printbounds)
-    ebits = _nbits(T)
-    epad = 8 * sizeof(T) - ebits  # MSB padding bits in the embedded type
+    ebits = nbits(T)
+    epad = 8 * sizeof(T) - ebits
     option = get(nctx, :optional, nothing)
     claims = unclaimed_sentinel(nctx)
     presbits = claims ? 1 : 0
     fieldvar = get(nctx, :fieldvar, gensym("embed"))
-    # Compute bit position without mutating state.bits
     nbits_pos = state.bits + ebits + presbits
-    # @defid types pack from the MSB, so embedded values must be shifted
-    # right by epad before packing (MSB→LSB) and left after extracting (LSB→MSB)
+    # Packed types store values MSB-aligned, so shift right before packing, left after extracting
     to_lsb(val) = :(Core.Intrinsics.lshr_int($val, $epad))
     to_msb(val) = :(Core.Intrinsics.shl_int($val, $epad))
-    # Parse: delegate to inner parsebytes
     eresult = Symbol("$(fieldvar)_result")
     epos = Symbol("$(fieldvar)_epos")
-    errmsg = register_errmsg(state, "Invalid embedded $(T)")
-    opt_label = get(nctx, :opt_label, nothing)
-    notfound = if isnothing(option)
-        [:(return ($errmsg, pos))]
-    else
-        [opt_fail_expr(option, opt_label)]
-    end
+    notfound = build_fail_expr!(state, nctx, "Invalid embedded $(T)")
     eshifted = Symbol("$(fieldvar)_shifted")
     pack = emit_pack(state, T, eshifted, nbits_pos - presbits)
     parse_exprs = ExprVarLine[
-          :(($eresult, $epos) = $(GlobalRef(M, :parsebytes))($T, @view idbytes[pos:end])),
-          :(if !($eresult isa $T); $(notfound...) end),
+          :(($eresult, $epos) = $(GlobalRef(PackedParselets, :parsebytes))($T, @view idbytes[pos:end])),
+          :(if !($eresult isa $T); $notfound end),
           :($eshifted = $(to_lsb(eresult))),
           pack]
     if claims
         push!(parse_exprs, emit_pack(state, Bool, true, nbits_pos))
     end
     push!(parse_exprs, :(pos += $epos - 1))
-    # Extract + print
     fextract = :($fieldvar = $(to_msb(emit_extract(state, nbits_pos - presbits, ebits, T))))
-    # Constructor impart
     argvar = gensym("arg_embed")
     argshifted = gensym("arg_embed_shifted")
     body = Any[:($argshifted = $(to_lsb(argvar))),
@@ -466,10 +407,11 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::Ve
     end
     sentinel = if claims; SentinelSpec((0, presbits)) else nothing end
     value_segment_output(;
-        nbits=ebits + presbits, fieldvar,
-        desc="embedded $(T)", shortform=string(T),
+        bounds=SegmentBounds(parsebounds(T)[1]:parsebounds(T)[2],
+                             printbounds(T)[1]:printbounds(T)[2],
+                             ebits + presbits, sentinel),
+        fieldvar, desc="embedded $(T)", shortform=string(T),
         argvar, base_argtype=T, option,
-        sentinel, parsed=_parsebounds(T)[1]:_parsebounds(T)[2], printed=_printbounds(T)[1]:_printbounds(T)[2],
         parse=parse_exprs,
         extract_setup=ExprVarLine[fextract], extract_value=fieldvar,
         impart_body=body, print=ExprVarLine[:(__tobytes_print(io, $fieldvar))])

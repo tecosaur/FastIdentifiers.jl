@@ -4,7 +4,8 @@
 using Test
 using InteractiveUtils: code_llvm
 using FastIdentifiers: FastIdentifiers, AbstractIdentifier, MalformedIdentifier,
-    ChecksumViolation, shortcode, purl, purlprefix, idcode, idchecksum, parsebytes, @defid
+    ChecksumViolation, shortcode, purl, purlprefix, idcode, idchecksum, @defid
+using FastIdentifiers.DefId.PackedParselets: parsebytes, parsebounds, printbounds, nbits
 using FastIdentifiers.DefId.Checksums: mod10, mod11_2
 
 # --- AST complexity analysis utilities ---
@@ -1315,8 +1316,8 @@ ttypeof(x) = typeof(x)
             # Different representations are not equal
             @test wpfx != bare
             # Bounds reflect both paths
-            @test FastIdentifiers.parsebounds(EmptyChoice) == (4, 6)
-            @test FastIdentifiers.printbounds(EmptyChoice) == (4, 6)
+            @test parsebounds(EmptyChoice) == (4, 6)
+            @test printbounds(EmptyChoice) == (4, 6)
             # Case folding on prefix
             @test parse(EmptyChoice, "V.5678") == parse(EmptyChoice, "v.5678")
             # Errors
@@ -1678,7 +1679,7 @@ ttypeof(x) = typeof(x)
                        optional("-", :a(digits(3:3, max=126)), ".", :b(digits(3:3, max=126)))))
             @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=20:80)
             eval(iddef)
-            @test FastIdentifiers.nbits(OptSentinelHoist) == 7 + 8 + 6  # 22, not 23
+            @test nbits(OptSentinelHoist) == 7 + 8 + 6  # 22, not 23
             @test parse(OptSentinelHoist, "42-050.100").a == 50
             @test parse(OptSentinelHoist, "42-050.100").b == 100
             @test parse(OptSentinelHoist, "42").a === nothing
@@ -2449,7 +2450,7 @@ end # embed
 @testset "PURL generation" begin
     @testset "WithPrefix" begin
         iddef = :(@defid WithPrefix ("WP-", :id(digits(max=9999))) purlprefix="https://example.com/wp/")
-        @test parsebytes_complexity(iddef) == (branches=5:9, branch_total=9, ops=38:47)
+        @test parsebytes_complexity(iddef) == (branches=5:9, branch_total=9, ops=37:46)
         eval(iddef)
         # purlprefix method
         @test purlprefix(WithPrefix) == "https://example.com/wp/"

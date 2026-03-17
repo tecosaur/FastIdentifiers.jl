@@ -52,16 +52,10 @@ function choice_setup(state::ParserState, nctx::NodeCtx, options::Vector{Any})
     else
         _ -> :($fieldvar = one($fieldvar))
     end
-    matcher, matchoptions, soptions = build_choice_matcher(
-        matchoptions, soptions, casefold, fieldvar, foundaction, choiceint, state, nctx)
+    cctx = (; matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
+    matcher, matchoptions, soptions = build_choice_matcher(state, nctx, cctx)
     # Build the length-guarded match wrapper
-    opt_label = get(nctx, :opt_label, nothing)
-    notfound = if isnothing(option)
-        errsym = register_errmsg(state, "Expected one of $(join(soptions, ", "))")
-        :(return ($errsym, pos))
-    else
-        opt_fail_expr(option, opt_label)
-    end
+    notfound = build_fail_expr!(state, nctx, "Expected one of $(join(soptions, ", "))")
     lencheck = emit_lengthcheck(state, nctx, minimum(ncodeunits, soptions))
     checkedmatch = if allowempty
         :(if $lencheck
@@ -117,12 +111,12 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
         option
     end
     sentinel = if claims; SentinelSpec((0, choicebits)) else nothing end
+    pmax = maximum(ncodeunits, soptions)
     value_segment_output(;
-        nbits=choicebits, fieldvar, desc=join(soptions, " | "),
+        bounds=SegmentBounds(pmin:pmax, pmin:pmax, choicebits, sentinel),
+        fieldvar, desc=join(soptions, " | "),
         shortform=join(soptions, " | "),
         argvar, base_argtype=:Symbol, option=eopt,
-        sentinel, parsed=pmin:maximum(ncodeunits, soptions),
-        printed=pmin:maximum(ncodeunits, soptions),
         parse=parse_exprs,
         extract_setup=ExprVarLine[fextract], extract_value,
         impart_body=impart_core, print=print_exprs)
@@ -160,21 +154,20 @@ Uses perfect hashing when available (with optional hash-skip optimisation
 for injective hashes and widened verify tables when they reduce chunk count),
 falls back to linear scan. May reorder options to match hash output order.
 """
-function build_choice_matcher(matchoptions::Vector{String}, soptions::Vector{String},
-                              casefold, fieldvar::Symbol, foundaction,
-                              choiceint, state::ParserState, nctx::NodeCtx)
-    ph = find_perfect_hash(matchoptions, casefold)
+function build_choice_matcher(state::ParserState, nctx::NodeCtx, cctx)
+    ph = find_perfect_hash(cctx.matchoptions, cctx.casefold)
     if !isnothing(ph)
-        build_hash_matcher(state, nctx, ph, matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
+        build_hash_matcher(state, nctx, ph, cctx)
     else
-        build_linear_matcher(state, nctx, matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
+        build_linear_matcher(state, nctx, cctx)
     end
 end
 
-function build_hash_matcher(state, nctx, ph, matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
+function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
+    (; casefold, fieldvar, foundaction, choiceint) = cctx
     # Reorder options to match hash output order
-    matchoptions = matchoptions[ph.perm]
-    soptions = soptions[ph.perm]
+    matchoptions = cctx.matchoptions[ph.perm]
+    soptions = cctx.soptions[ph.perm]
     optlens = Tuple(ncodeunits.(matchoptions))
     phoff = ph.pos - 1
     phposexpr = if iszero(phoff); :pos else :(pos + $phoff) end
@@ -297,8 +290,8 @@ function build_hash_matcher(state, nctx, ph, matchoptions, soptions, casefold, f
     (parts, matchoptions, soptions)
 end
 
-function build_linear_matcher(state::ParserState, nctx::NodeCtx,
-                              matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
+function build_linear_matcher(state::ParserState, nctx::NodeCtx, cctx)
+    (; matchoptions, soptions, casefold, fieldvar, foundaction, choiceint) = cctx
     # Sort longest-first for greedy matching when options share prefixes
     perm = sortperm(matchoptions, by=ncodeunits, rev=true)
     matchoptions = matchoptions[perm]

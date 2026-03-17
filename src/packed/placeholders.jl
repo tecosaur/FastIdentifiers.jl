@@ -91,7 +91,7 @@ This is an optimisation pass: at each segment boundary where the remaining
 byte guarantee is insufficient, it inserts a check for the maximum useful
 amount, pushing the next mandatory check as far forward as possible.
 
-When `state` is provided, error messages are registered via `register_errmsg`
+When `state` is provided, error messages are registered via `register_errmsg!`
 for proper error reporting. Without `state`, descriptions are used directly
 (for validation/comparison purposes only).
 """
@@ -156,6 +156,7 @@ function insert_length_checks!(pexprs::Vector{ExprVarLine}, branches::Vector{Par
     # Self-validating segments (no __length_check) and segments with their own
     # outer checks are skipped. The remaining guarantee still erodes by parsed_max.
     insertions = Tuple{Int, Expr}[]  # (pexprs index, check expression)
+    seg_guarantees = Dict{Int, Int}()  # seg_idx => remaining guarantee at entry
     for (bid, seg_indices) in branch_segs
         # The root branch starts with parsed_min guaranteed by the upfront
         # __branch_check. Optional branches start conservatively at 0 — their
@@ -164,16 +165,13 @@ function insert_length_checks!(pexprs::Vector{ExprVarLine}, branches::Vector{Par
         for si in seg_indices
             seg = segments[si]
             seg_entry_need = seg.parsed_min
-            # Skip framework insertion if:
-            # - the segment has no __length_check (self-validating handler), or
-            # - the segment's handler check already covers entry (has_own_outer_check)
             needs_framework_check = si in has_length_check && !(si in has_own_outer_check)
             if remaining < seg_entry_need && needs_framework_check
                 G = cumulative_entry_min(si, segments)
                 G = Base.max(G, seg_entry_need)
                 fail = if isnothing(seg.option)
                     erridx = if !isnothing(state)
-                        register_errmsg(state, seg.desc)
+                        register_errmsg!(state, seg.desc)
                     else
                         seg.desc
                     end
@@ -184,19 +182,19 @@ function insert_length_checks!(pexprs::Vector{ExprVarLine}, branches::Vector{Par
                 push!(insertions, (seg.begin_idx, :(nbytes - pos + 1 >= $G || $fail)))
                 remaining = G
             end
+            seg_guarantees[si] = remaining
             remaining -= seg.parsed_max
         end
     end
-    # Pass 3: resolve all sentinels using the static parsed_min guarantee.
-    # Inner sentinels resolve via `branches[bid].parsed_min - emission_max >= n`,
-    # matching the old resolution pass. Framework-inserted checks don't propagate
-    # additional guarantees to inner sentinels — this preserves handler code-path
-    # selection (e.g. wide vs narrow register loads).
+    # Pass 3: resolve inner sentinels using framework-propagated guarantees.
+    # Each segment's inner sentinels see the guarantee established by the
+    # framework check (or upfront check) that covers this segment.
     for (_, seg_indices) in branch_segs
         for si in seg_indices
             seg = segments[si]
+            guarantee = get(seg_guarantees, si, 0)
             for idx in seg.begin_idx+1:seg.end_idx-1
-                resolve_sentinels_with_guarantee!(pexprs, idx, branches, 0)
+                resolve_sentinels_with_guarantee!(pexprs, idx, branches, guarantee)
             end
         end
     end

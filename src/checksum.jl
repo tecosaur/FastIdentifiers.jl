@@ -10,7 +10,7 @@
 ## Checkdigit handler
 
 function compile_checkdigit(exprs::PatternExprs,
-                            state::DefIdState, nctx::NodeCtx,
+                            state::ParserState, nctx::NodeCtx,
                             ::SegmentDef, args::Vector{Any})
     !isnothing(get(nctx, :optional, nothing)) &&
         throw(ArgumentError("checkdigit cannot appear inside optional(...)"))
@@ -43,7 +43,7 @@ function compile_checkdigit(exprs::PatternExprs,
     checkbyte = gensym("checkbyte")
     checkval = gensym("checkval")
     ok_sym = gensym("checksum_ok")
-    errmsg = register_errmsg(state, "Invalid check character")
+    errmsg = register_errmsg!(state, "Invalid check character")
     lencheck = emit_lengthcheck(state, nctx, 1)
     seg = exprs.segments[seg_idx]
     extract_copy = map(copy, seg.extract)
@@ -80,7 +80,7 @@ Generates `idchecksum` and `idcode` methods, and patches `parse`/`tryparse`
 to handle checksum violations (negative pos from `__checksum_gate`).
 """
 function finalize_checkdigit!(block::Expr, exprs::PatternExprs,
-                              state::DefIdState, name::Symbol)
+                              state::ParserState, name::Symbol)
     idx = findfirst(p -> first(p) === :checkdigit, state.segment_outputs)
     isnothing(idx) && return
     output = last(state.segment_outputs[idx])
