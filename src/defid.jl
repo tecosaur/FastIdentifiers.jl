@@ -6,11 +6,10 @@ module DefId
 using FastIdentifiers: FastIdentifiers, AbstractIdentifier, MalformedIdentifier,
     ChecksumViolation, shortcode, purlprefix, idchecksum, idcode
 
-include("packed/PackedParselets.jl")
-using .PackedParselets:
+using PackedParselets: PackedParselets,
     ExprVarLine, NodeCtx, PatternExprs, ParserState,
     SegmentOutput, SegmentDef, SegmentBounds, SegmentCodegen, SegmentMeta,
-    CORE_SEGMENTS, segment_set, all_kwargs, maketype,
+    CORE_SEGMENTS, maketype,
     emit_lengthcheck, register_errmsg!, implement_casting!
 
 # Resolved checkdigit metadata for downstream codegen.
@@ -24,16 +23,13 @@ include("checksum.jl")
 
 ## Segment registry
 
-const ID_SEGMENTS = merge(CORE_SEGMENTS, segment_set(
-    SegmentDef(:checkdigit, compile_checkdigit, (), finalize_checkdigit!),
-))
+const ID_SEGMENTS = merge(CORE_SEGMENTS, (checkdigit = SegmentDef(:checkdigit, compile_checkdigit, (), finalize_checkdigit!),))
 
 const GLOBAL_KWARGS = (:purlprefix,)
 
 ## Identifier-specific finalization
 
-function identifier_finalize!(block::Expr, exprs::PatternExprs,
-                              state::ParserState, name::Symbol)
+function identifier_finalize!(block::Expr, state::ParserState, name::Symbol)
     ename = esc(name)
     push!(block.args, identifier_parse(state, name)...)
     # Rewrite Base.print → FastIdentifiers.shortcode (the generic
@@ -169,7 +165,7 @@ julia> (id.id, id.version, id.participants)
 """
 macro defid(name, pattern, args...)
     segments = ID_SEGMENTS
-    all_kws = (all_kwargs(segments)..., GLOBAL_KWARGS...)
+    all_kws = (Iterators.flatten(s.kwargs for s in segments)..., GLOBAL_KWARGS...)
     casefold_val = true
     prefix_val = nothing
     for arg in args
@@ -187,12 +183,13 @@ macro defid(name, pattern, args...)
         pattern
     end
     globals = if !isnothing(prefix_val); (; purlprefix = prefix_val) else (;) end
-    maketype(segments, __module__, name, full_pattern;
-             supertype = AbstractIdentifier,
-             casefold = casefold_val,
-             globals,
-             global_kwargs = GLOBAL_KWARGS,
-             finalize_fn = identifier_finalize!)
+    block, state = maketype(segments, __module__, name, full_pattern;
+                            supertype = AbstractIdentifier,
+                            casefold = casefold_val,
+                            globals,
+                            global_kwargs = GLOBAL_KWARGS)
+    identifier_finalize!(block, state, name)
+    block
 end
 
 end

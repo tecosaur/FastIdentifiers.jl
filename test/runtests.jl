@@ -185,5 +185,4 @@ end
     @test JSON3.read(JSON3.write(myid), MyIdentifier) == myid
 end
 
-include("packed.jl")
 include("defid.jl")

@@ -3,6 +3,9 @@ uuid = "4753c187-0528-4cab-a788-b8a80107dae0"
 version = "1.0.0"
 authors = ["TEC <git@tecosaur.net>"]
 
+[deps]
+PackedParselets = "209b254f-b05f-46a6-8f5d-65983536c2bc"
+
 [weakdeps]
 About = "69d22d85-9f48-4c46-bbbe-7ad8341ff72a"
 StructTypes = "856f2bd8-1eba-4b0a-8007-ebc267875bd4"
@@ -24,10 +27,11 @@ julia = "1.9"
 
 [extras]
 InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
+PackedParselets = "209b254f-b05f-46a6-8f5d-65983536c2bc"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 StyledStrings = "f489334b-da3d-4c2e-b8f0-e476e12c162b"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["InteractiveUtils", "StyledStrings", "Test", "JSON", "JSON3"]
+test = ["InteractiveUtils", "PackedParselets", "StyledStrings", "Test", "JSON", "JSON3"]
