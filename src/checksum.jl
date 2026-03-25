@@ -9,8 +9,8 @@
 
 ## Checkdigit handler
 
-function compile_checkdigit(exprs::PatternExprs,
-                            state::ParserState, nctx::NodeCtx,
+function compile_checkdigit(state::ParserState, nctx::NodeCtx,
+                            exprs::PatternExprs,
                             ::SegmentDef, args::Vector{Any})
     !isnothing(get(nctx, :optional, nothing)) &&
         throw(ArgumentError("checkdigit cannot appear inside optional(...)"))
@@ -66,7 +66,8 @@ function compile_checkdigit(exprs::PatternExprs,
         SegmentBounds(1:1, 1:1, 0, nothing),
         SegmentCodegen(parse_exprs, ExprVarLine[], print_detect, Any[],
                        ExprVarLine[:(write(io, $val_to_byte))]),
-        SegmentMeta(:checkdigit, "check digit", "check", nothing, nothing, checksum_info))
+        SegmentMeta(:checkdigit, "check digit", "check", nothing, nothing, checksum_info),
+        [[Checksums.valid_bytes(fn_resolved, nctx)]])
 end
 
 ## Checkdigit finalize hook
@@ -118,6 +119,7 @@ The default handles decimal digits (0–9).
 """
 parse_byte(fn, bytevar::Symbol, ::NodeCtx) =
     :(ifelse($bytevar - 0x30 < 0x0a, Int($bytevar - 0x30), -1))
+valid_bytes(fn, ::NodeCtx) = ByteSet(UInt8('0'):UInt8('9'))
 
 """
     print_byte(fn, valexpr, nctx::NodeCtx) -> Expr
@@ -166,6 +168,8 @@ parse_byte(::typeof(mod11_2), bytevar::Symbol, ::NodeCtx) =
     :(if $bytevar - 0x30 < 0x0a; Int($bytevar - 0x30)
       elseif ($bytevar | 0x20) == $(UInt8('x')); 10
       else -1 end)
+valid_bytes(::typeof(mod11_2), ::NodeCtx) =
+    ByteSet(UInt8('0'):UInt8('9'), UInt8('X'), UInt8('x'))
 print_byte(::typeof(mod11_2), valexpr, ::NodeCtx) =
     :(ifelse($valexpr < 10, UInt8($valexpr) + 0x30, $(UInt8('X'))))
 

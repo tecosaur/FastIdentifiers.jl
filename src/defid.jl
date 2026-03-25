@@ -7,7 +7,7 @@ using FastIdentifiers: FastIdentifiers, AbstractIdentifier, MalformedIdentifier,
     ChecksumViolation, shortcode, purlprefix, idchecksum, idcode
 
 using PackedParselets: PackedParselets,
-    ExprVarLine, NodeCtx, PatternExprs, ParserState,
+    ExprVarLine, NodeCtx, PatternExprs, ParserState, ByteSet,
     SegmentOutput, SegmentDef, SegmentBounds, SegmentCodegen, SegmentMeta,
     CORE_SEGMENTS, maketype,
     emit_lengthcheck, register_errmsg!, implement_casting!
