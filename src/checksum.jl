@@ -34,40 +34,50 @@ function compile_checkdigit(state::ParserState, nctx::NodeCtx,
         "checkdigit field :$fieldname has no matching segment"))
     # Resolve checksum function and codegen reference
     builtin = fn_expr isa Symbol && isdefined(Checksums, fn_expr)
-    fn_resolved = builtin ? getfield(Checksums, fn_expr) : Core.eval(state.mod, fn_expr)
-    fn_ref = builtin ? GlobalRef(Checksums, fn_expr) : esc(fn_expr)
-    checksum_info = ChecksumInfo((fn_ref, seg_idx,
-                                  Checksums.parse_byte(fn_resolved, :checkbyte, nctx)))
+    fn = if builtin getfield(Checksums, fn_expr) else Core.eval(state.mod, fn_expr) end
+    fnref = if builtin GlobalRef(Checksums, fn_expr) else esc(fn_expr) end
+    n = Checksums.nbytes(fn)
+    checkbytes = ntuple(i -> gensym("checkbyte$i"), n)
+    # Literal symbols for identifier_parse context (bound in the generated parse function)
+    report_bytes = ntuple(i -> Symbol("checkbyte$i"), n)
+    checksum_info = ChecksumInfo(fnref, seg_idx, n,
+                                  Checksums.parse_bytes(fn, report_bytes, nctx))
     # Parse codegen
     checkpos = gensym("checkpos")
-    checkbyte = gensym("checkbyte")
     checkval = gensym("checkval")
     ok_sym = gensym("checksum_ok")
-    errmsg = register_errmsg!(state, "Invalid check character")
-    lencheck = emit_lengthcheck(state, nctx, 1)
+    notfound = build_fail_expr!(state, nctx, "Invalid check character")
+    lencheck = emit_lengthcheck(state, nctx, n)
     seg = exprs.segments[seg_idx]
     extract_copy = map(copy, seg.extract)
     parse_exprs = ExprVarLine[
           :($checkpos = pos),
-          :(if !$lencheck; return ($errmsg, pos) end),
-          :($checkbyte = @inbounds idbytes[pos]),
-          :($checkval = $(Checksums.parse_byte(fn_resolved, checkbyte, nctx))),
-          :(if $checkval < 0; return ($errmsg, pos) end),
-          :(pos += 1),
-          :(id = parsed),
+          :(if !$lencheck; $notfound end)]
+    for (i, bvar) in enumerate(checkbytes)
+        push!(parse_exprs, :($bvar = @inbounds data[pos + $(i - 1)]))
+    end
+    append!(parse_exprs, ExprVarLine[
+          :($checkval = $(Checksums.parse_bytes(fn, checkbytes, nctx))),
+          :(if $checkval < 0; $notfound end),
+          :(pos += $n),
+          :(val = parsed),
           extract_copy[1:end-1]...,
-          :($ok_sym = ($checkval == $fn_ref($(last(extract_copy))))),
-          Expr(:call, :__checksum_gate, ok_sym, checkpos)]
-    # Print codegen — emit single byte via write(io, UInt8)
+          :($ok_sym = ($checkval == $fnref($(last(extract_copy))))),
+          Expr(:call, :__checksum_gate, ok_sym, checkpos)])
+    # Print codegen
     seg_print_extract = map(copy, seg.extract)
-    val_to_byte = Checksums.print_byte(fn_resolved, :($fn_ref($(last(seg_print_extract)))), nctx)
-    print_detect = ExprVarLine[seg_print_extract[1:end-1]...]
+    getval = ExprVarLine[seg_print_extract[1:end-1]...]
+    print_exprs = ExprVarLine[Checksums.print_bytes(fn, :($fnref($(last(seg_print_extract)))), nctx)...]
+    valid = Checksums.valid_bytes(fn, nctx)
     SegmentOutput(
-        SegmentBounds(1:1, 1:1, 0, nothing),
-        SegmentCodegen(parse_exprs, ExprVarLine[], print_detect, Any[],
-                       ExprVarLine[:(write(io, $val_to_byte))]),
+        SegmentBounds(n:n, n:n, 0, nothing),
+        SegmentCodegen(parse_exprs, ExprVarLine[],
+            PrintExprs(direct = ExprVarLine[getval..., print_exprs...],
+                       getval = getval, getlen = ExprVarLine[:(pos += $n)],
+                       putval = print_exprs),
+            Expr[]),
         SegmentMeta(:checkdigit, "check digit", "check", nothing, nothing, checksum_info),
-        [[Checksums.valid_bytes(fn_resolved, nctx)]])
+        [fill(valid, n)])
 end
 
 ## Checkdigit finalize hook
@@ -80,7 +90,7 @@ Post-assembly finalize hook for the checkdigit segment.
 Generates `idchecksum` and `idcode` methods, and patches `parse`/`tryparse`
 to handle checksum violations (negative pos from `__checksum_gate`).
 """
-function finalize_checkdigit!(block::Expr, exprs::PatternExprs,
+function finalize_checkdigit!(hookdata::Vector{Expr}, exprs::PatternExprs,
                               state::ParserState, name::Symbol)
     idx = findfirst(p -> first(p) === :checkdigit, state.segment_outputs)
     isnothing(idx) && return
@@ -92,12 +102,12 @@ function finalize_checkdigit!(block::Expr, exprs::PatternExprs,
     cs_extract = map(copy, seg.extract)
     implement_casting!(state, cs_extract)
     cs_value = last(cs_extract)
-    push!(block.args,
-          :(function $(GlobalRef(FastIdentifiers, :idchecksum))(id::$(esc(name)))
+    push!(hookdata,
+          :(function $(GlobalRef(FastIdentifiers, :idchecksum))(val::$(esc(name)))
                 $(cs_extract[1:end-1]...)
                 $fn($cs_value)
             end),
-          :(function $(GlobalRef(FastIdentifiers, :idcode))(id::$(esc(name)))
+          :(function $(GlobalRef(FastIdentifiers, :idcode))(val::$(esc(name)))
                 $(cs_extract[1:end-1]...)
                 $cs_value
             end))
@@ -107,7 +117,7 @@ end
 
 module Checksums
 
-using ..DefId: NodeCtx
+using ..DefId: NodeCtx, ByteSet
 
 """
     parse_byte(fn, bytevar::Symbol, nctx::NodeCtx) -> Expr
@@ -172,6 +182,59 @@ valid_bytes(::typeof(mod11_2), ::NodeCtx) =
     ByteSet(UInt8('0'):UInt8('9'), UInt8('X'), UInt8('x'))
 print_byte(::typeof(mod11_2), valexpr, ::NodeCtx) =
     :(ifelse($valexpr < 10, UInt8($valexpr) + 0x30, $(UInt8('X'))))
+
+"""
+    mod97(code::Integer) -> Int
+
+ISO 7064 MOD 97-10 checksum (ROR).
+
+The check value satisfies `code * 100 + check ≡ 1 (mod 97)`.
+Returns `98 - (code * 100) % 97`, yielding 2–98 as a two-digit decimal.
+"""
+mod97(code::Integer) = 98 - (code * 100) % 97
+
+## Multi-byte protocol
+
+"""
+    nbytes(fn) -> Int
+
+Number of check bytes for checksum function `fn`. Default is 1.
+Override for multi-byte checksums (e.g. `mod97` uses 2 digits).
+"""
+nbytes(fn) = 1
+nbytes(::typeof(mod97)) = 2
+
+"""
+    parse_bytes(fn, bytevars::NTuple{N, Symbol}, nctx) -> Expr
+
+Map multiple check bytes to a single integer value, or `-1` for invalid.
+Default defers to `parse_byte` for single-byte checksums.
+"""
+function parse_bytes(fn, bytevars::NTuple{1, Symbol}, nctx::NodeCtx)
+    parse_byte(fn, first(bytevars), nctx)
+end
+function parse_bytes(::typeof(mod97), bytevars::NTuple{2, Symbol}, ::NodeCtx)
+    b1, b2 = bytevars
+    :(if $b1 - 0x30 < 0x0a && $b2 - 0x30 < 0x0a
+          Int($b1 - 0x30) * 10 + Int($b2 - 0x30)
+      else -1 end)
+end
+
+"""
+    print_bytes(fn, valexpr, nctx) -> Vector{Expr}
+
+Emit expressions writing the check value as bytes.
+Default defers to `print_byte` for single-byte checksums.
+"""
+function print_bytes(fn, valexpr, nctx::NodeCtx)
+    [:(write(io, $(print_byte(fn, valexpr, nctx))))]
+end
+function print_bytes(::typeof(mod97), valexpr, ::NodeCtx)
+    [:(write(io, UInt8(($valexpr) ÷ 10) + 0x30)),
+     :(write(io, UInt8(($valexpr) % 10) + 0x30))]
+end
+
+valid_bytes(::typeof(mod97), ::NodeCtx) = ByteSet(UInt8('0'):UInt8('9'))
 
 end # module Checksums
 

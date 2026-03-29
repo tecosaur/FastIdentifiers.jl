@@ -61,25 +61,32 @@ All identifiers should ensure round-trip consistency:
 abstract type AbstractIdentifier end
 
 """
+    MalformedIdentifier{T}(input, position::Int, problem::String)
     MalformedIdentifier{T}(input, problem::String)
 
 Exception indicating that `input` is not a valid form of identifier type `T`.
 
 The `problem` string should describe what specifically makes the input invalid.
+`position` is the 1-based byte offset where the error was detected (0 if unknown).
 """
 struct MalformedIdentifier{T <: AbstractIdentifier, I} <: Exception
     input::I
+    position::Int
     problem::String
 end
 
+MalformedIdentifier{T}(input::I, position::Int, problem::String) where {T, I} =
+    MalformedIdentifier{T,I}(input, position, problem)
 MalformedIdentifier{T}(input::I, problem::String) where {T, I} =
-    MalformedIdentifier{T,I}(input, problem)
+    MalformedIdentifier{T,I}(input, 0, problem)
 
 """
+    ChecksumViolation{T}(id, position::Int, expected::Integer, provided::Integer)
     ChecksumViolation{T}(id, expected::Integer, provided::Integer)
 
 The `provided` checksum for the `T` identifier `id` is incorrect;
-the correct checksum is `expected`.
+the correct checksum is `expected`. `position` is the 1-based byte
+offset of the check character (0 if unknown).
 
 # Example
 
@@ -94,12 +101,15 @@ end
 """
 struct ChecksumViolation{T <: AbstractIdentifier, I} <: Exception
     id::I
+    position::Int
     expected::Int
     provided::Int
 end
 
+ChecksumViolation{T}(id::I, position::Int, expected::Integer, provided::Integer) where {T, I} =
+    ChecksumViolation{T, I}(id, position, Int(expected), Int(provided))
 ChecksumViolation{T}(id::I, expected::Integer, provided::Integer) where {T, I} =
-    ChecksumViolation{T, I}(id, Int(expected), Int(provided))
+    ChecksumViolation{T, I}(id, 0, Int(expected), Int(provided))
 
 """
     idcode(id::AbstractIdentifier) -> Union{Integer, Nothing}
@@ -198,6 +208,17 @@ function purlprefix(::Type{T}) where {T <: AbstractIdentifier} end
 purlprefix(::T) where {T <: AbstractIdentifier} = purlprefix(T)
 
 """
+    idprefix(::Type{<:AbstractIdentifier}) -> Union{String, Nothing}
+
+Return the canonical display prefix for an identifier type (e.g. "arXiv:"),
+or `nothing` if the type has no prefix. Used by `print` and `string` to
+produce the standard representation. Defaults to [`purlprefix`](@ref).
+"""
+idprefix(::Type{T}) where {T <: AbstractIdentifier} = purlprefix(T)
+
+idprefix(::T) where {T <: AbstractIdentifier} = idprefix(T)
+
+"""
     purl(id::AbstractIdentifier) -> Union{String, Nothing}
 
 If applicable, return the PURL of an `AbstractIdentifier`.
@@ -220,17 +241,15 @@ end
 function Base.print(io::IO, id::AbstractIdentifier)
     if get(io, :limit, false) === true
         get(io, :compact, false) === true ||
-            print(io, typeof(id), ':')
-        shortcode(io, id)
+            print(io, nameof(typeof(id)), ':')
     else
-        url = purl(id)
-        if !isnothing(url)
-            print(io, url)
-        else
-            shortcode(io, id)
-        end
+        prefix = idprefix(id)
+        isnothing(prefix) || print(io, prefix)
     end
+    shortcode(io, id)
 end
+
+Base.string(id::AbstractIdentifier) = sprint(print, id)
 
 function Base.show(io::IO, id::AbstractIdentifier)
     if get(io, :limit, false) === true

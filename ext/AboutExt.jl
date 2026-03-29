@@ -3,7 +3,8 @@
 
 module AboutExt
 
-using FastIdentifiers: AbstractIdentifier, segments
+using FastIdentifiers: AbstractIdentifier
+using PackedParselets: segments
 using About
 using StyledStrings: @styled_str as @S_str, face!
 using Base: AnnotatedString

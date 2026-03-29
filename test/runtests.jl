@@ -20,8 +20,10 @@ FastIdentifiers.idchecksum(myid::MyIdentifier) =
     @test shortcode(MyIdentifier(1234)) == "1234"
 end
 
-FastIdentifiers.shortcode(myid::MyIdentifier) =
-    string(myid.id) * string(idchecksum(myid), base=16)
+function FastIdentifiers.shortcode(io::IO, myid::MyIdentifier)
+    print(io, myid.id, string(idchecksum(myid), base=16))
+end
+FastIdentifiers.shortcode(myid::MyIdentifier) = sprint(shortcode, myid)
 
 FastIdentifiers.purlprefix(::Type{MyIdentifier}) = "http://example.com/myid/"
 
@@ -111,8 +113,8 @@ FastIdentifiers.idcode(ni::NestedIdentifier) = idcode(ni.inner)
 
     @testset "IO Context Behavior" begin
         print_cases = [
-            ((:limit => true,), "MyIdentifier:1234"),
-            ((:limit => true, :compact => true), "1234")
+            ((:limit => true,), "MyIdentifier:1234c"),
+            ((:limit => true, :compact => true), "1234c")
         ]
         for (context_pairs, expected) in print_cases
             @test sprint(print, myid; context=IOContext(stdout, context_pairs...)) == expected
@@ -141,7 +143,7 @@ FastIdentifiers.idcode(ni::NestedIdentifier) = idcode(ni.inner)
         for (input, error_type, message_part) in [
             ("1234x", MalformedIdentifier{MyIdentifier}, "Checksum must be a valid UInt8"),
             ("x1234a", MalformedIdentifier{MyIdentifier}, "ID must be a valid UInt16"),
-            ("1234a", ChecksumViolation{MyIdentifier}, "is 12 but got 10")
+            ("1234a", ChecksumViolation{MyIdentifier}, "expected 12, got 10")
         ]
             try
                 parse(MyIdentifier, input)

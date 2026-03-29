@@ -8,12 +8,28 @@ using FastIdentifiers: AbstractIdentifier, MalformedIdentifier, ChecksumViolatio
 using StyledStrings: @styled_str as @S_str
 
 function Base.showerror(io::IO, @nospecialize(ex::MalformedIdentifier{T})) where {T}
-    print(io, S"Malformed identifier: {bold:$T} identifier {emphasis:$(ex.input)} $(ex.problem)")
+    input = string(ex.input)
+    header = S"Malformed {blue:$T} identifier:"
+    if iszero(ex.position)
+        print(io, header, S" {emphasis:$input} $(ex.problem)")
+    else
+        pre, post = input[1:prevind(input, ex.position)], input[ex.position:end]
+        print(io, header, S"\n\n   {light:$pre}{error,bold:$post}")
+        print(io, '\n', ' '^(textwidth(pre) + 3), S"{error:└─╴}$(ex.problem)")
+    end
 end
 
 function Base.showerror(io::IO, @nospecialize(ex::ChecksumViolation{T})) where {T}
-    print(io, S"Checksum violation: the correct checksum for {bold:$T} identifier {emphasis:$(ex.id)} \
-                is {success:$(ex.expected)} but got {error:$(ex.provided)}")
+    input = string(ex.id)
+    header = S"Checksum violation in {blue:$T} identifier:"
+    msg = S"expected {success:$(ex.expected)}, got {error:$(ex.provided)}"
+    if iszero(ex.position)
+        print(io, header, S" {emphasis:$input} $msg")
+    else
+        pre, post = input[1:prevind(input, ex.position)], input[ex.position:end]
+        print(io, header, S"\n\n   {light:$pre}{error,bold:$post}")
+        print(io, '\n', ' '^(textwidth(pre) + 3), S"{error:└─╴}$msg")
+    end
 end
 
 function Base.show(io::IO, ::MIME"text/plain", id::AbstractIdentifier)

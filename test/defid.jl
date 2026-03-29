@@ -8,7 +8,7 @@ using Test
 using FastIdentifiers: FastIdentifiers, AbstractIdentifier, MalformedIdentifier,
     ChecksumViolation, shortcode, purl, purlprefix, idcode, idchecksum, @defid
 using PackedParselets: parsebytes, parsebounds, printbounds, nbits
-using FastIdentifiers.DefId.Checksums: mod10, mod11_2
+using FastIdentifiers.DefId.Checksums: mod10, mod11_2, mod97
 using InteractiveUtils: code_llvm
 
 """
@@ -209,4 +209,43 @@ end
         @test tryparse(CheckWithSkip, "1234-5") === nothing
         @test_neverthrow parsebytes(CheckWithSkip, ::Vector{UInt8})
     end
+    @testset "Multi-byte checkdigit (mod97)" begin
+        eval(:(@defid TestMod97 ("0", :id(digits(6, pad=6)),
+               checkdigit(:id, mod97))))
+        # mod97(123456) = 98 - (123456 * 100) % 97 = 76
+        @test mod97(123456) == 76
+        id = parse(TestMod97, "012345676")
+        @test id isa TestMod97
+        @test id.id == 123456
+        @test idchecksum(id) == 76
+        @test shortcode(id) == "012345676"
+        # Round-trip
+        @test parse(TestMod97, shortcode(id)) == id
+        # mod97(0) = 98, mod97(1) = 95
+        check_roundtrips(TestMod97, ("012345676", "000000098", "000000195"))
+        # ChecksumViolation on wrong check digits
+        @test_throws ChecksumViolation parse(TestMod97, "012345699")
+        err = try parse(TestMod97, "012345699"); nothing catch e; e end
+        @test err isa ChecksumViolation{TestMod97}
+        @test err.expected == 76
+        @test err.provided == 99
+        @test tryparse(TestMod97, "012345699") === nothing
+        # Invalid check characters
+        @test_throws MalformedIdentifier parse(TestMod97, "0123456AB")
+        # Too short
+        @test_throws MalformedIdentifier parse(TestMod97, "01234567")
+        # Constructor
+        @test TestMod97(123456) == id
+        @test_neverthrow parsebytes(TestMod97, ::Vector{UInt8})
+    end
 end # checkdigit
+
+@testset "supertype" begin
+    abstract type TestSuper <: AbstractIdentifier end
+    eval(:(@defid SubId <: TestSuper :id(digits(max=999))))
+    @test SubId <: TestSuper
+    @test SubId <: AbstractIdentifier
+    id = parse(SubId, "42")
+    @test id isa TestSuper
+    @test shortcode(id) == "42"
+end
