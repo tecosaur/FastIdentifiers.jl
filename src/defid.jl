@@ -342,7 +342,8 @@ macro defid(nameexpr, pattern, args...)
         steps = decompose_purl_prefix(purlprefix_val)
         full_pattern = Expr(:tuple, Expr(:call, :skip, steps...), full_pattern)
     end
-    globals = (; prefix = prefix_val, purlprefix = purlprefix_val)
+    # One concrete type whatever the values, so maketype's keyword body compiles once
+    globals = @NamedTuple{prefix::Any, purlprefix::Any}((prefix_val, purlprefix_val))
     typeparts, state = maketype(
         segments, __module__, name, full_pattern;
         supertype = supertype_val,
