@@ -3,6 +3,10 @@
 
 module DefId
 
+# Generation-time code dispatching on user-supplied checksums and segment handlers
+# (see the note in Checksums): don't let new methods of those invalidate it.
+Base.Experimental.@max_methods 1
+
 using FastIdentifiers: FastIdentifiers, AbstractIdentifier, MalformedIdentifier,
     ChecksumViolation, shortcode, idprefix, purlprefix, idchecksum, idcode
 

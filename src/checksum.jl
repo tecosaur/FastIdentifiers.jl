@@ -119,6 +119,11 @@ module Checksums
 
 using ..DefId: NodeCtx, ByteSet
 
+# Checksum functions extend this protocol with methods of their own, and it is
+# called on functions whose type inference can't know: analysing those calls
+# against the methods seen so far only makes every new checksum invalidate them.
+Base.Experimental.@max_methods 1
+
 """
     parse_byte(fn, bytevar::Symbol, nctx::NodeCtx) -> Expr
 
