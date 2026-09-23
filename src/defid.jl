@@ -43,7 +43,7 @@ function identifier_finalize(typeparts::NamedTuple, state::ParserState, name::Sy
     writecore = ExprVarLine[
         :(buf = Memory{UInt8}(undef, $maxbytes)),
         :(len = $tobytes_ref(buf, id)),
-        :(Base.unsafe_write(io, pointer(buf), len))]
+        :(GC.@preserve buf Base.unsafe_write(io, pointer(buf), len))]
     # Canonical prefix (defaults to purlprefix) and PURL prefix
     prefix = get(state.globals, :prefix, nothing)
     purlprefix = get(state.globals, :purlprefix, nothing)
