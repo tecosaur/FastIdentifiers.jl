@@ -364,13 +364,16 @@ macro defid(nameexpr, pattern, args...)
     result
 end
 
+# `parsebytes` is inlined into `parse`/`tryparse`, so needs no copy of its own. `print`
+# is precompiled for `IOBuffer`, the stream behind `sprint` and string interpolation.
 function precompile_exprs(name::Symbol)
     T = esc(name)
-    CU = Base.CodeUnits{UInt8, String}
-    Expr[:(precompile($(GlobalRef(PackedParselets, :parsebytes)), (Type{$T}, $CU))),
-         :(precompile($(GlobalRef(Base, :parse)), (Type{$T}, String))),
+    Expr[:(precompile($(GlobalRef(Base, :parse)), (Type{$T}, String))),
          :(precompile($(GlobalRef(Base, :tryparse)), (Type{$T}, String))),
-         :(precompile($(GlobalRef(Base, :string)), ($T,)))]
+         :(precompile($(GlobalRef(Base, :string)), ($T,))),
+         :(precompile($(GlobalRef(FastIdentifiers, :shortcode)), ($T,))),
+         :(precompile($(GlobalRef(FastIdentifiers, :purl)), ($T,))),
+         :(precompile($(GlobalRef(Base, :print)), (IOBuffer, $T)))]
 end
 
 end
