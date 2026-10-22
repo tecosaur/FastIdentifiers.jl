@@ -177,6 +177,25 @@ end
         @test TestMod11(1000002) == id
         @test_neverthrow parsebytes(TestMod11, ::Vector{UInt8})
     end
+    @testset "Checksum functions" begin
+        # ISO 7064 MOD 11-2 as specified: over the digits, most significant first
+        ref_mod11_2(code) = foldl((r, d) -> (r + d) * 2 % 11, reverse(digits(code, pad=15)); init=0) |>
+            r -> (12 - r) % 11
+        codes = [0, 1, 9, 10, 1000002, 1000003, 999_999_999_999_999,
+                 ((7919 * k^3 + k) % 10^15 for k in 1:300)...]
+        @test all(code -> mod11_2(code) == ref_mod11_2(code), codes)
+        @test mod11_2(21825009) == 7  # ORCID 0000-0002-1825-0097
+        # EAN-13/UPC: weights 3, 1, 3, … from the rightmost digit
+        ref_mod10(code) = (10 - sum(d * (isodd(k) ? 3 : 1) for (k, d) in enumerate(digits(code)); init=0) % 10) % 10
+        @test all(code -> mod10(code) == ref_mod10(code), codes)
+        @test mod10(400638133393) == 1  # EAN-13 4006381333931
+        # Run on every parse and print of a checksummed identifier
+        allocs(f, x) = @allocated f(x)
+        for f in (mod10, mod11_2, mod97)
+            allocs(f, 123456789)
+            @test allocs(f, 123456789) == 0
+        end
+    end
     @testset "Non-terminal checkdigit (followed by literal)" begin
         eval(:(@defid CheckThenLit (:code(digits(4:4, pad=4)),
                checkdigit(:code, mod10), "-end")))

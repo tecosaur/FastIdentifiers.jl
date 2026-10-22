@@ -155,11 +155,11 @@ Alternates weights 1 and 3 across digits from right to left,
 returns `(10 - sum % 10) % 10`.
 """
 function mod10(code::Integer)
-    s, w = 0, 3
+    # Four digits at a time, extracted independently rather than one serial divrem chain
+    s = 0
     while code > 0
-        code, d = divrem(code, 10)
-        s += d * w
-        w = 4 - w  # alternates 3, 1, 3, 1, ...
+        code, c = divrem(code, 10000)
+        s += 3(c % 10) + c ÷ 10 % 10 + 3(c ÷ 100 % 10) + c ÷ 1000
     end
     (10 - s % 10) % 10
 end
@@ -173,11 +173,14 @@ Processes digits left to right: `r = (r + digit) * 2 mod 11`.
 Returns `(12 - r) mod 11`, yielding 0–10 (10 maps to 'X' via `print_byte`).
 """
 function mod11_2(code::Integer)
-    r = 0
-    for d in Iterators.reverse(digits(code))
-        r = (r + d) * 2 % 11
+    # Digit k from the right weighs 2^k (mod 11): take four at a time (2^4 ≡ 5)
+    r, w = 0, 1
+    while code > 0
+        code, c = divrem(code, 10000)
+        r += w * (2(c % 10) + 4(c ÷ 10 % 10) + 8(c ÷ 100 % 10) + 16(c ÷ 1000))
+        w = 5w % 11
     end
-    (12 - r) % 11
+    (12 - r % 11) % 11
 end
 parse_byte(::typeof(mod11_2), bytevar::Symbol, ::NodeCtx) =
     :(if $bytevar - 0x30 < 0x0a; Int($bytevar - 0x30)
