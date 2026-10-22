@@ -37,6 +37,8 @@ const ID_SEGMENTS = merge(CORE_SEGMENTS, (checkdigit = SegmentDef(:checkdigit, c
 
 const GLOBAL_KWARGS = (:prefix, :purlprefix)
 
+const ALL_KWARGS = unique!(Symbol[Iterators.flatten(s.kwargs for s in ID_SEGMENTS)..., GLOBAL_KWARGS...])
+
 ## Identifier-specific finalization
 
 function identifier_finalize(typeparts::NamedTuple, state::ParserState, name::Symbol)
@@ -313,15 +315,14 @@ macro defid(nameexpr, pattern, args...)
         nameexpr::Symbol, AbstractIdentifier
     end
     segments = ID_SEGMENTS
-    all_kws = (Iterators.flatten(s.kwargs for s in segments)..., GLOBAL_KWARGS...)
     casefold_val = true
     prefix_val = nothing
     purlprefix_val = nothing
     for arg in args
         Meta.isexpr(arg, :(=), 2) || throw(ArgumentError("Expected keyword arguments of the form key=value, got $arg"))
         kwname, kwval = arg.args
-        kwname ∈ all_kws ||
-            throw(ArgumentError("Unknown keyword argument $kwname. Known keyword arguments are: $(join(all_kws, ", "))"))
+        kwname ∈ ALL_KWARGS ||
+            throw(ArgumentError("Unknown keyword argument $kwname. Known keyword arguments are: $(join(ALL_KWARGS, ", "))"))
         kwname === :casefold && (casefold_val = kwval)
         kwname === :prefix && (prefix_val = kwval)
         kwname === :purlprefix && (purlprefix_val = kwval)
