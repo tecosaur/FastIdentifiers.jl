@@ -146,41 +146,55 @@ The default handles decimal digits (0–9).
 print_byte(fn, valexpr, ::NodeCtx) =
     :(UInt8($valexpr) + 0x30)
 
+## Weighted digit sums
+
+# The digits of `n < 10^8` in 16-bit lanes: digits 0, 2, 4, 6 (from the right) and 1, 3, 5, 7
+@inline function digitlanes(n::UInt64)
+    hi = n ÷ 10000
+    halves = (n - 10000hi) | hi << 32
+    hundreds = ((halves * 5243) >> 19) & 0x0000007f_0000007f  # ÷100 per lane
+    pairs = (halves - 100hundreds) | hundreds << 16
+    tens = ((pairs * 103) >> 10) & 0x000f_000f_000f_000f      # ÷10 per lane
+    pairs - 10tens, tens
+end
+
+# Σ lane_k × weight_k, with lane k's weight in lane 3 - k
+@inline lanedot(lanes::UInt64, weights::UInt64) = Int((lanes * weights) >> 48)
+
+@inline function chunks8(code::Integer)
+    u = UInt64(code)
+    rest = u ÷ 100_000_000
+    u - 100_000_000rest, rest % 100_000_000, rest ÷ 100_000_000
+end
+
 """
     mod10(code::Integer) -> Int
 
-Weighted mod-10 checksum (EAN-13/UPC).
+Weighted mod-10 checksum (EAN-13/UPC) of a `code` in `0:typemax(UInt64)`.
 
-Alternates weights 1 and 3 across digits from right to left,
+Alternates weights 3 and 1 across digits from right to left,
 returns `(10 - sum % 10) % 10`.
 """
 function mod10(code::Integer)
-    # Four digits at a time, extracted independently rather than one serial divrem chain
-    s = 0
-    while code > 0
-        code, c = divrem(code, 10000)
-        s += 3(c % 10) + c ÷ 10 % 10 + 3(c ÷ 100 % 10) + c ÷ 1000
-    end
-    (10 - s % 10) % 10
+    sum10(c) = ((even, odd) = digitlanes(c); lanedot(3even + odd, 0x0001_0001_0001_0001))
+    c0, c1, c2 = chunks8(code)
+    (10 - (sum10(c0) + sum10(c1) + sum10(c2)) % 10) % 10
 end
 
 """
     mod11_2(code::Integer) -> Int
 
-ISO 7064 MOD 11-2 checksum (ORCID, ISNI).
+ISO 7064 MOD 11-2 checksum (ORCID, ISNI) of a `code` in `0:typemax(UInt64)`.
 
 Processes digits left to right: `r = (r + digit) * 2 mod 11`.
 Returns `(12 - r) mod 11`, yielding 0–10 (10 maps to 'X' via `print_byte`).
 """
 function mod11_2(code::Integer)
-    # Digit k from the right weighs 2^k (mod 11): take four at a time (2^4 ≡ 5)
-    r, w = 0, 1
-    while code > 0
-        code, c = divrem(code, 10000)
-        r += w * (2(c % 10) + 4(c ÷ 10 % 10) + 8(c ÷ 100 % 10) + 16(c ÷ 1000))
-        w = 5w % 11
-    end
-    (12 - r % 11) % 11
+    # Digit k from the right weighs 2^(k+1) mod 11, so each 8-digit chunk a further 2^8 ≡ 3
+    sum11(c) = ((even, odd) = digitlanes(c);
+                lanedot(even, 0x0002_0008_000a_0007) + lanedot(odd, 0x0004_0005_0009_0003))
+    c0, c1, c2 = chunks8(code)
+    (12 - (sum11(c0) + 3sum11(c1) + 9sum11(c2)) % 11) % 11
 end
 parse_byte(::typeof(mod11_2), bytevar::Symbol, ::NodeCtx) =
     :(if $bytevar - 0x30 < 0x0a; Int($bytevar - 0x30)
