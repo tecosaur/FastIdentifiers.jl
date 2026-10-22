@@ -1,6 +1,6 @@
 name = "FastIdentifiers"
 uuid = "4753c187-0528-4cab-a788-b8a80107dae0"
-version = "1.0.0"
+version = "1.1.0"
 authors = ["TEC <git@tecosaur.net>"]
 
 [deps]
@@ -20,7 +20,7 @@ StructUtilsExt = "StructUtils"
 
 [compat]
 JSON = "1"
-PackedParselets = "1"
+PackedParselets = "1.1"
 StructTypes = "1"
 StructUtils = "2.1"
 StyledStrings = "1"
