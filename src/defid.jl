@@ -349,6 +349,9 @@ macro defid(nameexpr, pattern, args...)
     end
     extra = identifier_finalize(typeparts, state, name)
     precompile_stmts = precompile_exprs(name)
+    for ex in extra
+        PackedParselets.inline_globals!(Base.remove_linenums!(ex)::Expr, @__MODULE__)
+    end
     result = Expr(:toplevel, values(idparts)..., extra..., precompile_stmts..., nothing)
     result
 end
