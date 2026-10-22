@@ -259,6 +259,27 @@ end
     end
 end # checkdigit
 
+@testset "Base methods through FastIdentifiers' hooks" begin
+    eval(:(@defid HookedId ("H", :id(digits(4, pad=4)), optional(".", :v(digits(max=9)))) purlprefix="https://h.org/"))
+    # Loading many identifier types stays cheap: none extends these Base functions itself
+    for f in (Base.parse, Base.string, Base.write, Base.show, Base.isless,
+              Base.getproperty, Base.propertynames)
+        @test !any(m -> occursin("HookedId", string(m.sig)), methods(f))
+    end
+    a, b = parse(HookedId, "H0012.3"), parse(HookedId, "H0042")
+    @test (a.id, a.v, b.v) == (12, 3, nothing)
+    @test propertynames(a) == (:id, :v)
+    @test isless(a, b) && !isless(b, a)
+    @test string(a) == "https://h.org/H0012.3"
+    @test sprint(write, a) == string(a)
+    @test sprint(show, a) == "HookedId(12, 3)"
+    @test_throws MalformedIdentifier parse(HookedId, "X")
+    # Hand-written identifiers keep their fields and fallbacks
+    @test MyIdentifier(7).id == 7
+    @test propertynames(MyIdentifier(7)) == (:id,)
+    @test which(parse, (Type{MyIdentifier}, String)).module === parentmodule(MyIdentifier)
+end
+
 @testset "supertype" begin
     abstract type TestSuper <: AbstractIdentifier end
     eval(:(@defid SubId <: TestSuper :id(digits(max=999))))

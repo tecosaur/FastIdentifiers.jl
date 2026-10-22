@@ -249,9 +249,26 @@ function Base.print(io::IO, id::AbstractIdentifier)
     shortcode(io, id)
 end
 
-Base.string(id::AbstractIdentifier) = sprint(print, id)
+## Implementation hooks
+#
+# `@defid` types implement these, so Base's large (costly to extend) method tables gain
+# one method each
 
-function Base.show(io::IO, id::AbstractIdentifier)
+idparse(::Type{T}, id::AbstractString) where {T} = throw(MethodError(parse, (T, id)))
+idstring(id::AbstractIdentifier) = sprint(print, id)
+idwrite(io::IO, id::AbstractIdentifier) = invoke(write, Tuple{IO, Any}, io, id)
+idgetproperty(id::AbstractIdentifier, name::Symbol) = getfield(id, name)
+idpropertynames(id::AbstractIdentifier) = fieldnames(typeof(id))
+
+Base.parse(::Type{T}, id::AbstractString) where {T <: AbstractIdentifier} = idparse(T, id)
+Base.string(id::AbstractIdentifier) = idstring(id)
+Base.write(io::IO, id::AbstractIdentifier) = idwrite(io, id)
+Base.show(io::IO, @nospecialize(id::AbstractIdentifier)) = idshow(io, id)
+Base.isless(a::T, b::T) where {T <: AbstractIdentifier} = idisless(a, b)
+@inline Base.getproperty(id::AbstractIdentifier, name::Symbol) = idgetproperty(id, name)
+Base.propertynames(id::AbstractIdentifier) = idpropertynames(id)
+
+function idshow(io::IO, @nospecialize(id::AbstractIdentifier))
     if get(io, :limit, false) === true
         if get(io, :typeinfo, Nothing) != typeof(id)
             print(io, nameof(typeof(id)), ':')
@@ -268,7 +285,7 @@ function Base.show(io::IO, id::AbstractIdentifier)
     end
 end
 
-function Base.isless(a::T, b::T) where {T <: AbstractIdentifier}
+function idisless(a::T, b::T) where {T <: AbstractIdentifier}
     ca = idcode(a)
     cb = idcode(b)
     (isnothing(ca) || isnothing(cb)) && return isless(shortcode(a), shortcode(b))

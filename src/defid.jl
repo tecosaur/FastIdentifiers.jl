@@ -41,6 +41,16 @@ const ALL_KWARGS = unique!(Symbol[Iterators.flatten(s.kwargs for s in ID_SEGMENT
 
 ## Identifier-specific finalization
 
+# Point a generated method definition at the function `f` instead
+function retarget!(def::Expr, f::GlobalRef)
+    sig = def.args[1]
+    while Meta.isexpr(sig, (:where, :(::)))
+        sig = sig.args[1]
+    end
+    sig.args[1] = f
+    def
+end
+
 function identifier_finalize(typeparts::NamedTuple, state::ParserState, name::Symbol)
     shortcode_ref = GlobalRef(FastIdentifiers, :shortcode)
     tobytes_ref = GlobalRef(PackedParselets, :tobytes)
@@ -54,6 +64,12 @@ function identifier_finalize(typeparts::NamedTuple, state::ParserState, name::Sy
     prefix = get(state.globals, :prefix, nothing)
     purlprefix = get(state.globals, :purlprefix, nothing)
     prefix = something(prefix, purlprefix, Some(nothing))
+    # One buffer rather than a concatenation: StringMemory is truncated in place
+    prefixed_string(pre::String) = quote
+        buf = Base.StringMemory($(ncodeunits(pre) + maxbytes))
+        GC.@preserve buf Base.unsafe_copyto!(pointer(buf), pointer($pre), $(ncodeunits(pre)))
+        String(Base.wrap(Array, buf, $tobytes_ref(buf, id, $(ncodeunits(pre)))))
+    end
     # write = prefix + shortcode content; shortcode = just the content
     # When no prefix, shortcode delegates to write (identical).
     # When prefix, shortcode uses the stack-buffer core directly.
@@ -67,17 +83,17 @@ function identifier_finalize(typeparts::NamedTuple, state::ParserState, name::Sy
           end)
     if isnothing(prefix)
         push!(extra,
-              :(function $(GlobalRef(Base, :write))(io::IO, id::$(esc(name)))
+              :(@inline function $(GlobalRef(FastIdentifiers, :idwrite))(io::IO, id::$(esc(name)))
                     $(writecore...)
                 end),
               :($(shortcode_ref)(io::IO, id::$(esc(name))) =
                     ($(GlobalRef(Base, :write))(io, id); nothing)),
-              :($(GlobalRef(Base, :string))(id::$(esc(name))) =
+              :(@inline $(GlobalRef(FastIdentifiers, :idstring))(id::$(esc(name))) =
                     $shortcode_ref(id)))
     else
         push!(extra,
               :($(GlobalRef(FastIdentifiers, :idprefix))(::Type{$(esc(name))}) = $prefix),
-              :(function $(GlobalRef(Base, :write))(io::IO, id::$(esc(name)))
+              :(@inline function $(GlobalRef(FastIdentifiers, :idwrite))(io::IO, id::$(esc(name)))
                     write(io, $prefix)
                     $(writecore...)
                 end),
@@ -85,8 +101,7 @@ function identifier_finalize(typeparts::NamedTuple, state::ParserState, name::Sy
                     $(writecore...)
                     nothing
                 end),
-              :($(GlobalRef(Base, :string))(id::$(esc(name))) =
-                    $prefix * $shortcode_ref(id)))
+              :(@inline $(GlobalRef(FastIdentifiers, :idstring))(id::$(esc(name))) = $(prefixed_string(prefix))))
     end
     if !isnothing(purlprefix)
         push!(extra, :($(GlobalRef(FastIdentifiers, :purlprefix))(::Type{$(esc(name))}) = $purlprefix))
@@ -107,7 +122,7 @@ function build_show(pp_show::Expr, name::Symbol, shortcode_ref::GlobalRef)
              :(show(io, $(esc(name)))),
              :(print(io, '(', $shortcode_ref(val), ')')))
     end
-    :(function $(GlobalRef(Base, :show))(io::IO, val::$(esc(name)))
+    :(function $(GlobalRef(FastIdentifiers, :idshow))(io::IO, val::$(esc(name)))
           if get(io, :limit, false) === true
               if get(io, :typeinfo, Nothing) != $(esc(name))
                   print(io, $(QuoteNode((esc(name)).args[1])), ':')
@@ -162,7 +177,7 @@ function identifier_parse(state::ParserState, name::Symbol)
     else
         :(result isa $(esc(name)) && pos > ncodeunits(id))
     end
-    (:(function $(GlobalRef(Base, :parse))(::Type{$(esc(name))}, id::AbstractString)
+    (:(@inline function $(GlobalRef(FastIdentifiers, :idparse))(::Type{$(esc(name))}, id::AbstractString)
            $(parse_body.args...)
        end),
      :(function $(GlobalRef(Base, :tryparse))(::Type{$(esc(name))}, id::AbstractString)
@@ -233,35 +248,6 @@ function leading_skip_strings(@nospecialize(pattern))
     end
     strings
 end
-
-"""
-    expand_macrocall_inbounds!(expr)
-
-Pre-expand `@inbounds expr` macro calls to avoid a Julia <1.12 hygiene
-bug where the expansion introduces `local val = expr` whose gensym'd
-`val` clashes with function parameters named `val`. Uses a unique local
-name to avoid the collision.
-"""
-function expand_macrocall_inbounds!(ex)
-    ex isa Expr || return ex
-    for (i, a) in enumerate(ex.args)
-        if Meta.isexpr(a, :macrocall) && !isempty(a.args) &&
-                a.args[1] === Symbol("@inbounds")
-            inner = a.args[end]
-            expand_macrocall_inbounds!(inner)
-            v = gensym("inbounds")
-            ex.args[i] = Expr(:block,
-                              Expr(:inbounds, true),
-                              Expr(:local, :($v = $inner)),
-                              Expr(:inbounds, :pop),
-                              v)
-        else
-            expand_macrocall_inbounds!(a)
-        end
-    end
-    ex
-end
-
 
 """
     @defid name pattern [kwarg=value...]
@@ -355,14 +341,11 @@ macro defid(nameexpr, pattern, args...)
         casefold = casefold_val,
         globals,
         global_kwargs = GLOBAL_KWARGS)
-    # Work around Julia <1.12 hygiene bug: @inbounds expands to
-    # `local val = expr` which conflicts with function parameters
-    # named `val` after gensym renaming. Pre-expand in PackedParselets code.
     idparts = Base.structdiff(typeparts, NamedTuple{(:print, :show)})
-    if VERSION < v"1.12-"
-        for expr in values(idparts)
-            expand_macrocall_inbounds!(expr)
-        end
+    # Hooks rather than per-type Base methods (see api.jl)
+    for (part, hook) in ((:properties, :idgetproperty), (:propertynames, :idpropertynames), (:isless, :idisless))
+        def = getfield(idparts, part)
+        Meta.isexpr(def, (:function, :(=))) && retarget!(def, GlobalRef(FastIdentifiers, hook))
     end
     extra = identifier_finalize(typeparts, state, name)
     precompile_stmts = precompile_exprs(name)
