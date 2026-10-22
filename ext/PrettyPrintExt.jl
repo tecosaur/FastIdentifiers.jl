@@ -32,7 +32,8 @@ function Base.showerror(io::IO, @nospecialize(ex::ChecksumViolation{T})) where {
     end
 end
 
-function Base.show(io::IO, ::MIME"text/plain", id::AbstractIdentifier)
+# Not hot: one compiled method serves every identifier type
+function Base.show(io::IO, ::MIME"text/plain", @nospecialize(id::AbstractIdentifier))
     label = String(nameof(typeof(id)))
     lowerlabel = lowercase(label)
     url = purl(id)
@@ -53,5 +54,8 @@ function Base.show(io::IO, ::MIME"text/plain", id::AbstractIdentifier)
         print(io, S"{link=$url:$idstr}")
     end
 end
+
+# Warm the styling machinery, the bulk of the first display
+precompile(Base.show, (IOContext{IOBuffer}, MIME"text/plain", AbstractIdentifier))
 
 end
