@@ -233,7 +233,7 @@ including strings inside `choice(...)` arguments. Returns an empty
 vector if the pattern does not start with a skip.
 """
 function leading_skip_strings(@nospecialize(pattern))
-    head = Meta.isexpr(pattern, :tuple) ? get(pattern.args, 1, nothing) : pattern
+    head = if Meta.isexpr(pattern, :tuple) get(pattern.args, 1, nothing) else pattern end
     Meta.isexpr(head, :call) && length(head.args) >= 2 &&
         head.args[1] === :skip || return String[]
     strings = String[]
@@ -318,21 +318,23 @@ macro defid(nameexpr, pattern, args...)
         throw(ArgumentError("Supertype must be a subtype of AbstractIdentifier, got $supertype_expr"))
     # Resolve $-interpolations in the pattern at macro-expansion time
     pattern = resolve_interpolations(__module__, pattern)
-    # Prepend skip segments for prefix and PURL prefix stripping.
-    # PURL: sequential steps (scheme choice, then domain+path choice) so that
+    # Skip steps for prefix and PURL prefix stripping, leading the pattern's own skip so all
+    # are one segment. PURL: sequential steps (scheme choice, then domain+path choice) so that
     # "https://example.com/foo/123", "http://example.com/foo/123",
     # and "example.com/foo/123" are all accepted.
     # Prefix: simple case-insensitive skip, unless the pattern already
     # starts with a skip that covers the prefix string.
-    full_pattern = pattern
+    steps = if isnothing(purlprefix_val) Union{String, Expr}[] else decompose_purl_prefix(purlprefix_val) end
     if !isnothing(prefix_val) && !isempty(prefix_val) &&
-            lowercase(prefix_val) ∉ map(lowercase, leading_skip_strings(full_pattern))
-        full_pattern = Expr(:tuple, Expr(:call, :skip, prefix_val), full_pattern)
+            lowercase(prefix_val) ∉ map(lowercase, leading_skip_strings(pattern))
+        push!(steps, prefix_val)
     end
-    if !isnothing(purlprefix_val)
-        steps = decompose_purl_prefix(purlprefix_val)
-        full_pattern = Expr(:tuple, Expr(:call, :skip, steps...), full_pattern)
-    end
+    head = if Meta.isexpr(pattern, :tuple) first(pattern.args) else pattern end
+    full_pattern = if isempty(steps) pattern
+    elseif Meta.isexpr(head, :call) && head.args[1] === :skip
+        merged = Expr(:call, :skip, steps..., head.args[2:end]...)
+        if Meta.isexpr(pattern, :tuple) Expr(:tuple, merged, pattern.args[2:end]...) else merged end
+    else Expr(:tuple, Expr(:call, :skip, steps...), pattern) end
     # One concrete type whatever the values, so maketype's keyword body compiles once
     globals = @NamedTuple{prefix::Any, purlprefix::Any}((prefix_val, purlprefix_val))
     typeparts, state = maketype(
