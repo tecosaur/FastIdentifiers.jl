@@ -56,13 +56,19 @@ function compile_checkdigit(state::ParserState, nctx::NodeCtx,
     for (i, bvar) in enumerate(checkbytes)
         push!(parse_exprs, :($bvar = @inbounds data[pos + $(i - 1)]))
     end
+    expected = gensym("expected")
+    lanecheck = gen_lane_check(state, fn, fnref, prop_val, expected)
     append!(parse_exprs, ExprVarLine[
           :($checkval = $(Checksums.parse_bytes(fn, checkbytes, nctx))),
           :(if $checkval < 0; $notfound end),
+          lanecheck...,
+          :(if $(if isempty(lanecheck) true else :($expected < 0) end)
+                val = parsed
+                $(extract_copy[1:end-1]...)
+                $expected = $fnref($(last(extract_copy)))
+            end),
           :(pos += $n),
-          :(val = parsed),
-          extract_copy[1:end-1]...,
-          :($ok_sym = ($checkval == $fnref($(last(extract_copy))))),
+          :($ok_sym = ($checkval == $expected)),
           Expr(:call, :__checksum_gate, ok_sym, checkpos)])
     # Print codegen
     seg_print_extract = map(copy, seg.extract)
@@ -78,6 +84,48 @@ function compile_checkdigit(state::ParserState, nctx::NodeCtx,
             Expr[]),
         SegmentMeta(:checkdigit, "check digit", "check", nothing, nothing, checksum_info),
         [fill(valid, n)])
+end
+
+# Set `expected` to the check value from the digits before `pos` (or -1), when `fn` is a
+# weighted digit sum and they match the field's canonical layout: holding as many digits
+# as the field, they are then its digits, however it parsed
+function gen_lane_check(state::ParserState, fn, fnref, label::Symbol, expected::Symbol)
+    output = if !isempty(state.segment_outputs) last(last(state.segment_outputs)) end
+    layout = if !isnothing(output) && output.meta.label == label output.meta.context end
+    layout isa Vector{ByteSet} || return ExprVarLine[]
+    digit_set, k, weights = ByteSet(UInt8('0'):UInt8('9')), 0, Int[]
+    for lane in Iterators.reverse(layout)  # A digit's weight, or a separator's -1
+        w = if lane == digit_set; k += 1; Checksums.digitweight(fn, k - 1) elseif length(lane) == 1; -1 end
+        isnothing(w) && return ExprVarLine[]
+        pushfirst!(weights, w)
+    end
+    # Registers ending at `pos`, the first reaching back `pad` bytes before the field; each
+    # byte's digit and separator masks, separator, and weight
+    width = length(layout); pad = 8 * cld(width, 8) - width
+    digitmask, sepmask, sepval, weight = zeros(UInt64, width + pad), zeros(UInt64, width + pad), zeros(UInt64, width + pad), zeros(UInt64, width + pad)
+    for i in 1:width
+        if weights[i] >= 0; digitmask[pad+i], weight[pad+i] = 0xff, weights[i]
+        else sepmask[pad+i], sepval[pad+i] = 0xff, first(layout[i]) end
+    end
+    lanes(v::Vector{UInt64}, r::Int) = (x = zero(UInt64); for j in 0:7; x |= v[8r + j + 1] << 8j; end; x)
+    # Σ lane × weight lands in the top 16-bit lane when the lanes' weights are mirrored
+    dot(r::Int, odd::Int) = (x = zero(UInt64); for j in 0:3; x |= weight[8r + 2j + odd + 1] << (16 * (3 - j)); end; x)
+    loads, bad, sum = ExprVarLine[], Expr[], Expr[]
+    for r in 0:cld(width, 8)-1
+        x = gensym("lanes")
+        push!(loads, :($x = htol(Base.unsafe_load(Ptr{UInt64}(pointer(data, pos - $(8 * cld(width, 8) - 8r)))))))
+        digits, seps, sepvals = lanes(digitmask, r), lanes(sepmask, r), lanes(sepval, r)
+        # A digit lane's top nibble is 3 both before and after adding 6
+        push!(bad, :(((($x & ($x + 0x0606060606060606)) & 0xf0f0f0f0f0f0f0f0) ⊻ 0x3030303030303030) & $digits |
+                     ($x ⊻ $sepvals) & $seps))
+        push!(sum, :(Int(((($x & 0x000f000f000f000f) * $(dot(r, 0))) >> 48) + (((($x >> 8) & 0x000f000f000f000f) * $(dot(r, 1))) >> 48))))
+    end
+    ExprVarLine[:($expected = -1),
+                :(if pos > $width && canreadback(data, pos - $width, $pad)
+                      $(loads...)
+                      iszero($(Expr(:call, :|, bad...))) &&
+                          ($expected = $(GlobalRef(Checksums, :checkfromsum))($fnref, $(Expr(:call, :+, sum...))))
+                  end)]
 end
 
 ## Checkdigit finalize hook
@@ -214,6 +262,20 @@ The check value satisfies `code * 100 + check ≡ 1 (mod 97)`.
 Returns `98 - (code * 100) % 97`, yielding 2–98 as a two-digit decimal.
 """
 mod97(code::Integer) = 98 - (code * 100) % 97
+
+## Weighted digit sums
+
+"""
+    digitweight(fn, k) -> Union{Int, Nothing}
+    checkfromsum(fn, sum::Int) -> Int
+
+For a check `fn` computed from a weighted sum of a code's decimal digits, the weight of
+the digit `k` places from the right (from 0, in `0:255`), and the check from that sum.
+Parsing then computes it from the digits as read. `digitweight` is otherwise `nothing`.
+"""
+digitweight(fn, k::Int) = nothing
+digitweight(::typeof(mod11_2), k::Int) = powermod(2, k + 1, 11)
+checkfromsum(::typeof(mod11_2), sum::Int) = (12 - sum % 11) % 11
 
 ## Multi-byte protocol
 
