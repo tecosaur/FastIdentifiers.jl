@@ -90,9 +90,14 @@ end
 # weighted digit sum and they match the field's canonical layout: holding as many digits
 # as the field, they are then its digits, however it parsed
 function gen_lane_check(state::ParserState, fn, fnref, label::Symbol, expected::Symbol)
-    output = if !isempty(state.segment_outputs) last(last(state.segment_outputs)) end
-    layout = if !isnothing(output) && output.meta.label == label output.meta.context end
+    at = something(findlast(((_, o),) -> o.meta.label == label, state.segment_outputs), 0)
+    layout = if at > 0 last(state.segment_outputs[at]).meta.context end
     layout isa Vector{ByteSet} || return ExprVarLine[]
+    # Only skips may follow it, of bytes no lane takes, which then fail the lanes' check
+    for (kind, output) in state.segment_outputs[at+1:end]
+        kind === :skip || return ExprVarLine[]
+        for alt in output.bytespans, b in alt; isdisjoint(b, reduce(∪, layout)) || return ExprVarLine[] end
+    end
     digit_set, k, weights = ByteSet(UInt8('0'):UInt8('9')), 0, Int[]
     for lane in Iterators.reverse(layout)  # A digit's weight, or a separator's -1
         w = if lane == digit_set; k += 1; Checksums.digitweight(fn, k - 1) elseif length(lane) == 1; -1 end
@@ -276,6 +281,8 @@ Parsing then computes it from the digits as read. `digitweight` is otherwise `no
 digitweight(fn, k::Int) = nothing
 digitweight(::typeof(mod11_2), k::Int) = powermod(2, k + 1, 11)
 checkfromsum(::typeof(mod11_2), sum::Int) = (12 - sum % 11) % 11
+digitweight(::typeof(mod10), k::Int) = if iseven(k); 3 else 1 end
+checkfromsum(::typeof(mod10), sum::Int) = (10 - sum % 10) % 10
 
 ## Multi-byte protocol
 
