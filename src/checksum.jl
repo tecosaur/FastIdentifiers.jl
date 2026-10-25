@@ -106,31 +106,37 @@ function gen_lane_check(state::ParserState, fn, fnref, label::Symbol, expected::
     end
     # Registers ending at `pos`, the first reaching back `pad` bytes before the field; each
     # byte's digit and separator masks, separator, and weight
-    width = length(layout); pad = 8 * cld(width, 8) - width
-    digitmask, sepmask, sepval, weight = zeros(UInt64, width + pad), zeros(UInt64, width + pad), zeros(UInt64, width + pad), zeros(UInt64, width + pad)
-    for i in 1:width
-        if weights[i] >= 0; digitmask[pad+i], weight[pad+i] = 0xff, weights[i]
-        else sepmask[pad+i], sepval[pad+i] = 0xff, first(layout[i]) end
+    function lanecheck(layout::Vector{ByteSet}, weights::Vector{Int})
+        width = length(layout); pad = 8 * cld(width, 8) - width
+        digitmask, sepmask, sepval, weight = zeros(UInt64, width + pad), zeros(UInt64, width + pad), zeros(UInt64, width + pad), zeros(UInt64, width + pad)
+        for i in 1:width
+            if weights[i] >= 0; digitmask[pad+i], weight[pad+i] = 0xff, weights[i]
+            else sepmask[pad+i], sepval[pad+i] = 0xff, first(layout[i]) end
+        end
+        lanes(v::Vector{UInt64}, r::Int) = (x = zero(UInt64); for j in 0:7; x |= v[8r + j + 1] << 8j; end; x)
+        # Σ lane × weight lands in the top 16-bit lane when the lanes' weights are mirrored
+        dot(r::Int, odd::Int) = (x = zero(UInt64); for j in 0:3; x |= weight[8r + 2j + odd + 1] << (16 * (3 - j)); end; x)
+        loads, bad, sum = ExprVarLine[], Expr[], Expr[]
+        for r in 0:cld(width, 8)-1
+            x = gensym("lanes")
+            push!(loads, :($x = htol(Base.unsafe_load(Ptr{UInt64}(pointer(data, pos - $(8 * cld(width, 8) - 8r)))))))
+            digits, seps, sepvals = lanes(digitmask, r), lanes(sepmask, r), lanes(sepval, r)
+            # A digit lane's top nibble is 3 both before and after adding 6
+            push!(bad, :(((($x & ($x + 0x0606060606060606)) & 0xf0f0f0f0f0f0f0f0) ⊻ 0x3030303030303030) & $digits |
+                         ($x ⊻ $sepvals) & $seps))
+            push!(sum, :(Int(((($x & 0x000f000f000f000f) * $(dot(r, 0))) >> 48) + (((($x >> 8) & 0x000f000f000f000f) * $(dot(r, 1))) >> 48))))
+        end
+        :(if pos > $width && canreadback(data, pos - $width, $pad)
+              $(loads...)
+              iszero($(Expr(:call, :|, bad...))) &&
+                  ($expected = $(GlobalRef(Checksums, :checkfromsum))($fnref, $(Expr(:call, :+, sum...))))
+          end)
     end
-    lanes(v::Vector{UInt64}, r::Int) = (x = zero(UInt64); for j in 0:7; x |= v[8r + j + 1] << 8j; end; x)
-    # Σ lane × weight lands in the top 16-bit lane when the lanes' weights are mirrored
-    dot(r::Int, odd::Int) = (x = zero(UInt64); for j in 0:3; x |= weight[8r + 2j + odd + 1] << (16 * (3 - j)); end; x)
-    loads, bad, sum = ExprVarLine[], Expr[], Expr[]
-    for r in 0:cld(width, 8)-1
-        x = gensym("lanes")
-        push!(loads, :($x = htol(Base.unsafe_load(Ptr{UInt64}(pointer(data, pos - $(8 * cld(width, 8) - 8r)))))))
-        digits, seps, sepvals = lanes(digitmask, r), lanes(sepmask, r), lanes(sepval, r)
-        # A digit lane's top nibble is 3 both before and after adding 6
-        push!(bad, :(((($x & ($x + 0x0606060606060606)) & 0xf0f0f0f0f0f0f0f0) ⊻ 0x3030303030303030) & $digits |
-                     ($x ⊻ $sepvals) & $seps))
-        push!(sum, :(Int(((($x & 0x000f000f000f000f) * $(dot(r, 0))) >> 48) + (((($x >> 8) & 0x000f000f000f000f) * $(dot(r, 1))) >> 48))))
-    end
-    ExprVarLine[:($expected = -1),
-                :(if pos > $width && canreadback(data, pos - $width, $pad)
-                      $(loads...)
-                      iszero($(Expr(:call, :|, bad...))) &&
-                          ($expected = $(GlobalRef(Checksums, :checkfromsum))($fnref, $(Expr(:call, :+, sum...))))
-                  end)]
+    checks = ExprVarLine[:($expected = -1), lanecheck(layout, weights)]
+    # Grouped digits often come without their separators
+    k < length(layout) &&
+        push!(checks, :(if $expected < 0; $(lanecheck(fill(digit_set, k), Int[Checksums.digitweight(fn, j) for j in k-1:-1:0])) end))
+    checks
 end
 
 ## Checkdigit finalize hook
