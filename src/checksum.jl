@@ -72,15 +72,14 @@ function compile_checkdigit(state::ParserState, nctx::NodeCtx,
           Expr(:call, :__checksum_gate, ok_sym, checkpos)])
     # Print codegen
     seg_print_extract = map(copy, seg.extract)
-    getval = ExprVarLine[seg_print_extract[1:end-1]...]
-    print_exprs = ExprVarLine[Checksums.print_bytes(fn, :($fnref($(last(seg_print_extract)))), nctx)...]
+    printcheck = gensym("check")
+    print_exprs = ExprVarLine[seg_print_extract[1:end-1]...,
+                              :($printcheck = $fnref($(last(seg_print_extract)))),
+                              Checksums.print_bytes(fn, printcheck, nctx)...]
     valid = Checksums.valid_bytes(fn, nctx)
     SegmentOutput(
         SegmentBounds(n:n, n:n, 0, nothing),
-        SegmentCodegen(parse_exprs, ExprVarLine[],
-            PrintExprs(direct = ExprVarLine[getval..., print_exprs...],
-                       getval = getval, getlen = ExprVarLine[:(pos += $n)]),
-            Expr[]),
+        SegmentCodegen(parse_exprs, ExprVarLine[], print_exprs, Expr[]),
         SegmentMeta(:checkdigit, "check digit", "check", nothing, nothing, checksum_info),
         [fill(valid, n)])
 end
@@ -319,15 +318,15 @@ end
 """
     print_bytes(fn, valexpr, nctx) -> Vector{Expr}
 
-Emit expressions writing the check value as bytes.
+Emit expressions writing the check value as bytes to `buf` after `pos`, advancing `pos`.
 Default defers to `print_byte` for single-byte checksums.
 """
 function print_bytes(fn, valexpr, nctx::NodeCtx)
-    [:(write(io, $(print_byte(fn, valexpr, nctx))))]
+    [:(@inbounds buf[pos += 1] = $(print_byte(fn, valexpr, nctx)))]
 end
 function print_bytes(::typeof(mod97), valexpr, ::NodeCtx)
-    [:(write(io, UInt8(($valexpr) ÷ 10) + 0x30)),
-     :(write(io, UInt8(($valexpr) % 10) + 0x30))]
+    [:(@inbounds buf[pos += 1] = UInt8(($valexpr) ÷ 10) + 0x30),
+     :(@inbounds buf[pos += 1] = UInt8(($valexpr) % 10) + 0x30)]
 end
 
 valid_bytes(::typeof(mod97), ::NodeCtx) = ByteSet(UInt8('0'):UInt8('9'))

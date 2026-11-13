@@ -11,7 +11,7 @@ using FastIdentifiers: FastIdentifiers, AbstractIdentifier, MalformedIdentifier,
     ChecksumViolation, shortcode, idprefix, purlprefix, idchecksum, idcode
 
 using PackedParselets: PackedParselets,
-    ExprVarLine, NodeCtx, PatternExprs, ParserState, ByteSet, PrintExprs,
+    ExprVarLine, NodeCtx, PatternExprs, ParserState, ByteSet,
     SegmentOutput, SegmentDef, SegmentBounds, SegmentCodegen, SegmentMeta,
     CORE_SEGMENTS, maketype,
     emit_lengthcheck, build_fail_expr!, implement_casting!
@@ -54,6 +54,7 @@ end
 function identifier_finalize(typeparts::NamedTuple, state::ParserState, name::Symbol)
     shortcode_ref = GlobalRef(FastIdentifiers, :shortcode)
     tobytes_ref = GlobalRef(PackedParselets, :tobytes)
+    takestring_ref = GlobalRef(PackedParselets, :takestring)
     maxbytes = state.branches[1].print_max
     # Stack-buffer write core: tobytes into a fixed-size buffer, unsafe_write to IO
     writecore = ExprVarLine[
@@ -68,7 +69,7 @@ function identifier_finalize(typeparts::NamedTuple, state::ParserState, name::Sy
     prefixed_string(pre::String) = quote
         buf = Base.StringMemory($(ncodeunits(pre) + maxbytes))
         GC.@preserve buf Base.unsafe_copyto!(pointer(buf), pointer($pre), $(ncodeunits(pre)))
-        String(Base.wrap(Array, buf, $tobytes_ref(buf, id, $(ncodeunits(pre)))))
+        $takestring_ref(buf, $tobytes_ref(buf, id, $(ncodeunits(pre))))
     end
     # write = prefix + shortcode content; shortcode = just the content
     # When no prefix, shortcode delegates to write (identical).
@@ -76,11 +77,7 @@ function identifier_finalize(typeparts::NamedTuple, state::ParserState, name::Sy
     extra = Expr[identifier_parse(state, name)...]
     # Per-type show only when PackedParselets generated a constructor form
     typeparts.show != :() && push!(extra, build_show(typeparts.show, name, shortcode_ref))
-    push!(extra, @static if VERSION >= v"1.12-"
-              :($(shortcode_ref)(id::$(esc(name))) = Base.unsafe_takestring($tobytes_ref(id)))
-          else
-              :($(shortcode_ref)(id::$(esc(name))) = String($tobytes_ref(id)))
-          end)
+    push!(extra, :($(shortcode_ref)(id::$(esc(name))) = $(prefixed_string(""))))
     if isnothing(prefix)
         push!(extra,
               :(@inline function $(GlobalRef(FastIdentifiers, :idwrite))(io::IO, id::$(esc(name)))
